@@ -691,14 +691,19 @@ function setVisFilter(v) {
 }
 
 // Generic cached JSON fetch. GitHub calls get auth headers + rate-limit display, and skip
-// the cache when a token is present (no private data written to localStorage, never stale).
-// Transient failures are retried: GitHub's 5xx error pages come without CORS headers, so the
-// browser surfaces them as opaque network errors ("NetworkError when attempting to fetch").
+// the localStorage cache when a token is present (no private data written to disk) — but an
+// in-memory session cache always applies, so navigating around doesn't re-burst the API
+// (bursts can trip GitHub's abuse detection, which answers 503 without CORS headers).
+// Transient failures are retried, and authenticated GitHub calls that keep failing with 5xx
+// are retried once anonymously: public data still loads when GitHub rejects the token.
+const memCache = new Map();
+
 async function apiFetch(url, isGitHub = false) {
+  if (memCache.has(url)) return memCache.get(url);
   const useCache = !(isGitHub && getToken());
   if (useCache) {
     const cached = cacheGet(url);
-    if (cached !== null) return cached;
+    if (cached !== null) { memCache.set(url, cached); return cached; }
   }
   const opts = {};
   if (isGitHub) {
@@ -738,8 +743,20 @@ async function apiFetch(url, isGitHub = false) {
       throw new Error(`API ${resp.status}: ${resp.statusText} (${u.hostname}${u.pathname})`);
     }
     const data = await resp.json();
+    memCache.set(url, data);
     if (useCache) cacheSet(url, data);
     return data;
+  }
+  // Anonymous fallback for authenticated GitHub calls stuck on 5xx (works for public data)
+  if (isGitHub && getToken()) {
+    try {
+      const r2 = await fetch(url, { headers: { 'Accept': 'application/vnd.github.v3+json' } });
+      if (r2.ok) {
+        const d2 = await r2.json();
+        memCache.set(url, d2);
+        return d2;
+      }
+    } catch {}
   }
   throw lastErr;
 }
