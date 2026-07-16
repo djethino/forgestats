@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GitHub Release Stats</title>
+<title>ForgeStats — repo & release stats across forges</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <style>
 :root {
@@ -417,12 +417,26 @@ header h1 svg { fill: var(--text); }
   border-radius: 20px;
   padding: 4px 12px 4px 4px;
   font-size: 13px;
+  color: var(--text);
 }
 
 .contributor img {
   width: 28px;
   height: 28px;
   border-radius: 50%;
+}
+
+.contributor .initial {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--surface2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--accent);
 }
 
 /* Topics */
@@ -530,8 +544,8 @@ header h1 svg { fill: var(--text); }
 <header>
   <div class="container">
     <h1 onclick="navigateHome()" style="cursor:pointer" title="Home">
-      <svg height="24" width="24" viewBox="0 0 16 16"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"></path></svg>
-      GitHub Stats
+      <svg height="24" width="24" viewBox="0 0 24 24"><path d="M12 2 3 7v6c0 5 3.8 8.4 9 9 5.2-.6 9-4 9-9V7l-9-5zm0 2.2 7 3.9v4.9c0 4-3 6.7-7 7.3-4-.6-7-3.3-7-7.3V8.1l7-3.9z"/><path d="M8 11h8v2H8zm2 3h4v2h-4zm-1-6h6v2H9z"/></svg>
+      ForgeStats
     </h1>
     <div class="breadcrumb" id="breadcrumb"></div>
     <div class="header-right">
@@ -550,17 +564,28 @@ header h1 svg { fill: var(--text); }
 <script>
 const LANG_COLORS = {"JavaScript":"#f1e05a","TypeScript":"#3178c6","Python":"#3572A5","Java":"#b07219","C++":"#f34b7d","C#":"#178600","C":"#555555","Go":"#00ADD8","Rust":"#dea584","Ruby":"#701516","PHP":"#4F5D95","Swift":"#F05138","Kotlin":"#A97BFF","Dart":"#00B4AB","Shell":"#89e051","HTML":"#e34c26","CSS":"#563d7c","Vue":"#41b883","Svelte":"#ff3e00","Lua":"#000080","R":"#198CE7","Scala":"#c22d40","Elixir":"#6e4a7e","Haskell":"#5e5086","Zig":"#ec915c","Nim":"#ffc200","GDScript":"#355570","GLSL":"#5686a5","HLSL":"#aace60"};
 
-// ---- STATE (populated from the URL: #gh=user&sf=user&repo=name) ----
-const state = { gh: null, sf: '', sfMap: null };
+// ---- FORGES ----
+// main: can be the primary profile / mirror: can contribute download counts / counts: tracks downloads
+const FORGES = {
+  github:      { label: 'GitHub',      color: '#d2a8ff', main: true,  mirror: true,  counts: true  },
+  gitlab:      { label: 'GitLab',      color: '#fc6d26', main: true,  mirror: false, counts: false },
+  codeberg:    { label: 'Codeberg',    color: '#2185d0', main: true,  mirror: true,  counts: true  },
+  sourceforge: { label: 'SourceForge', color: '#ff6600', main: false, mirror: true,  counts: true  },
+};
 
-let allRepos = [];
+// ---- STATE (populated from the URL: #main=forge:user&mirrors=forge:user,forge:user&repo=name) ----
+const state = {
+  main: null,        // {forge, user}
+  mirrors: [],       // [{forge, user, names, map: {repoName -> target|null}, _rels: {}}]
+  mirrorsKey: '',
+};
 
-// localStorage cache (30 min): stretches the anonymous GitHub rate limit (60 req/h)
+// localStorage cache (30 min): stretches anonymous API rate limits
 const CACHE_TTL = 30 * 60 * 1000;
 
 function cacheGet(key) {
   try {
-    const raw = localStorage.getItem('ght:' + key);
+    const raw = localStorage.getItem('fgs:' + key);
     if (!raw) return null;
     const { t, v } = JSON.parse(raw);
     if (Date.now() - t > CACHE_TTL) return null;
@@ -569,100 +594,263 @@ function cacheGet(key) {
 }
 
 function cacheSet(key, v) {
-  try { localStorage.setItem('ght:' + key, JSON.stringify({ t: Date.now(), v })); } catch {}
+  try { localStorage.setItem('fgs:' + key, JSON.stringify({ t: Date.now(), v })); } catch {}
 }
 
-// Optional token, stored only in the browser (never in the URL or the code)
+// Optional GitHub token, stored only in the browser (never in the URL or the code)
 function getToken() {
-  try { return localStorage.getItem('ght_token') || ''; } catch { return ''; }
+  try { return localStorage.getItem('fgs_token') || ''; } catch { return ''; }
 }
 
-function apiHeaders() {
-  const h = { 'Accept': 'application/vnd.github.v3+json' };
-  const token = getToken();
-  if (token) h['Authorization'] = `token ${token}`;
-  return h;
-}
-
-async function apiFetch(url) {
-  // Skip the cache when authenticated: 5,000 req/h is plenty, and private data
-  // should never be written to localStorage or served stale after a token change
-  const useCache = !getToken();
+// Generic cached JSON fetch. GitHub calls get auth headers + rate-limit display, and skip
+// the cache when a token is present (no private data written to localStorage, never stale)
+async function apiFetch(url, isGitHub = false) {
+  const useCache = !(isGitHub && getToken());
   if (useCache) {
     const cached = cacheGet(url);
     if (cached !== null) return cached;
   }
-  const resp = await fetch(url, { headers: apiHeaders() });
-  const remaining = resp.headers.get('X-RateLimit-Remaining');
-  const limit = resp.headers.get('X-RateLimit-Limit');
-  if (remaining !== null) {
-    document.getElementById('rateLimit').textContent = `API: ${remaining}/${limit}`;
+  const opts = {};
+  if (isGitHub) {
+    opts.headers = { 'Accept': 'application/vnd.github.v3+json' };
+    const token = getToken();
+    if (token) opts.headers['Authorization'] = `token ${token}`;
   }
-  if (!resp.ok) throw new Error(`GitHub API ${resp.status}: ${resp.statusText}`);
+  const resp = await fetch(url, opts);
+  if (isGitHub) {
+    const remaining = resp.headers.get('X-RateLimit-Remaining');
+    const limit = resp.headers.get('X-RateLimit-Limit');
+    if (remaining !== null) {
+      document.getElementById('rateLimit').textContent = `GitHub API: ${remaining}/${limit}`;
+    }
+  }
+  if (!resp.ok) throw new Error(`API ${resp.status}: ${resp.statusText} (${new URL(url).hostname})`);
   const data = await resp.json();
   if (useCache) cacheSet(url, data);
   return data;
 }
 
-async function fetchAllRepos() {
-  // If the provided token belongs to the requested profile, include private repos
-  let baseUrl = `https://api.github.com/users/${state.gh}/repos?type=public`;
-  if (getToken()) {
-    try {
-      const me = await apiFetch('https://api.github.com/user');
-      if (me.login && me.login.toLowerCase() === state.gh.toLowerCase()) {
-        baseUrl = 'https://api.github.com/user/repos?affiliation=owner';
+// ---- NORMALIZED MODEL ----
+// repo:    {name, description, language, stars, forks, issues, watchers, updated, pushed, created,
+//           url, homepage, topics, private, sizeKB, branch, license, fork}
+// release: {tag, name, date, prerelease, assets: [{name, size, downloads}]}  (downloads: null = not tracked)
+
+function isHashAsset(name) {
+  return /(\.sha256(sum)?(\.txt)?$|^sha256sums?(\.txt)?$)/i.test(name);
+}
+
+function countableAssets(release) {
+  return (release && release.assets ? release.assets : []).filter(a => !isHashAsset(a.name));
+}
+
+// Main-forge downloads of a release; null when the forge doesn't track them (GitLab)
+function releaseMainDl(release) {
+  if (!release) return 0;
+  if (!FORGES[state.main.forge].counts) return null;
+  return countableAssets(release).reduce((sum, a) => sum + (a.downloads || 0), 0);
+}
+
+// ---- ADAPTERS ----
+
+const adapters = {
+
+  github: {
+    async listRepos(user) {
+      // If the provided token belongs to the requested profile, include private repos
+      let baseUrl = `https://api.github.com/users/${user}/repos?type=public`;
+      if (getToken()) {
+        try {
+          const me = await apiFetch('https://api.github.com/user', true);
+          if (me.login && me.login.toLowerCase() === user.toLowerCase()) {
+            baseUrl = 'https://api.github.com/user/repos?affiliation=owner';
+          }
+        } catch {}
       }
-    } catch {}
-  }
-  let page = 1;
-  let repos = [];
-  while (true) {
-    const batch = await apiFetch(`${baseUrl}&per_page=100&page=${page}`);
-    repos = repos.concat(batch);
-    if (batch.length < 100) break;
-    page++;
-  }
-  return repos.filter(r => !r.fork);
-}
+      let page = 1, repos = [];
+      while (true) {
+        const batch = await apiFetch(`${baseUrl}&per_page=100&page=${page}`, true);
+        repos = repos.concat(batch);
+        if (batch.length < 100) break;
+        page++;
+      }
+      return repos.filter(r => !r.fork).map(this.normRepo);
+    },
+    normRepo(r) {
+      return {
+        name: r.name, description: r.description, language: r.language,
+        stars: r.stargazers_count, forks: r.forks_count, issues: r.open_issues_count,
+        watchers: r.subscribers_count ?? null, updated: r.updated_at, pushed: r.pushed_at || r.updated_at,
+        created: r.created_at, url: r.html_url, homepage: r.homepage, topics: r.topics || [],
+        private: !!r.private, sizeKB: r.size, branch: r.default_branch,
+        license: r.license ? r.license.spdx_id : null, fork: r.fork
+      };
+    },
+    async getRepo(user, name) {
+      return this.normRepo(await apiFetch(`https://api.github.com/repos/${user}/${name}`, true));
+    },
+    normRelease(r) {
+      return {
+        tag: r.tag_name, name: r.name, date: r.published_at, prerelease: r.prerelease,
+        assets: (r.assets || []).map(a => ({ name: a.name, size: a.size, downloads: a.download_count }))
+      };
+    },
+    async listReleases(user, name) {
+      try {
+        const rels = await apiFetch(`https://api.github.com/repos/${user}/${name}/releases?per_page=100`, true);
+        return rels.map(this.normRelease);
+      } catch { return []; }
+    },
+    async latestRelease(user, name) {
+      try {
+        return this.normRelease(await apiFetch(`https://api.github.com/repos/${user}/${name}/releases/latest`, true));
+      } catch { return null; }
+    },
+    async extras(user, name) {
+      const [contributors, languages, commitActivity, participation] = await Promise.all([
+        apiFetch(`https://api.github.com/repos/${user}/${name}/contributors?per_page=20`, true).catch(() => []),
+        apiFetch(`https://api.github.com/repos/${user}/${name}/languages`, true).catch(() => ({})),
+        apiFetch(`https://api.github.com/repos/${user}/${name}/stats/commit_activity`, true).catch(() => []),
+        apiFetch(`https://api.github.com/repos/${user}/${name}/stats/participation`, true).catch(() => null),
+      ]);
+      return {
+        contributors: (Array.isArray(contributors) ? contributors : []).map(c => ({
+          name: c.login, contributions: c.contributions, avatar: c.avatar_url, url: c.html_url
+        })),
+        languages, commitActivity, participation
+      };
+    },
+  },
 
-async function fetchLatestRelease(owner, repo) {
-  try {
-    return await apiFetch(`https://api.github.com/repos/${owner}/${repo}/releases/latest`);
-  } catch { return null; }
-}
+  gitlab: {
+    async listRepos(user) {
+      let projects = await this.pagedProjects(`https://gitlab.com/api/v4/users/${encodeURIComponent(user)}/projects`).catch(() => []);
+      if (projects.length === 0) {
+        // The profile may be a group rather than a user
+        projects = await this.pagedProjects(`https://gitlab.com/api/v4/groups/${encodeURIComponent(user)}/projects`).catch(() => []);
+      }
+      return projects.filter(p => !p.forked_from_project).map(this.normRepo);
+    },
+    async pagedProjects(baseUrl) {
+      let page = 1, all = [];
+      while (true) {
+        const batch = await apiFetch(`${baseUrl}?per_page=100&page=${page}`);
+        all = all.concat(batch);
+        if (batch.length < 100) break;
+        page++;
+      }
+      return all;
+    },
+    normRepo(p) {
+      return {
+        name: p.path, description: p.description, language: null,
+        stars: p.star_count, forks: p.forks_count, issues: p.open_issues_count ?? 0,
+        watchers: null, updated: p.last_activity_at, pushed: p.last_activity_at,
+        created: p.created_at, url: p.web_url, homepage: null, topics: p.topics || [],
+        private: p.visibility ? p.visibility !== 'public' : false, sizeKB: null,
+        branch: p.default_branch, license: p.license ? (p.license.nickname || p.license.key) : null,
+        fork: !!p.forked_from_project
+      };
+    },
+    projectPath(user, name) { return encodeURIComponent(`${user}/${name}`); },
+    async getRepo(user, name) {
+      const p = await apiFetch(`https://gitlab.com/api/v4/projects/${this.projectPath(user, name)}?license=true`);
+      return this.normRepo(p);
+    },
+    normRelease(r) {
+      return {
+        tag: r.tag_name, name: r.name, date: r.released_at, prerelease: !!r.upcoming_release,
+        // GitLab does not track download counts on release assets
+        assets: ((r.assets && r.assets.links) || []).map(l => ({ name: l.name, size: null, downloads: null }))
+      };
+    },
+    async listReleases(user, name) {
+      try {
+        const rels = await apiFetch(`https://gitlab.com/api/v4/projects/${this.projectPath(user, name)}/releases?per_page=100`);
+        return rels.map(r => this.normRelease(r));
+      } catch { return []; }
+    },
+    async latestRelease(user, name) {
+      const rels = await this.listReleases(user, name);
+      return rels[0] || null;
+    },
+    async extras(user, name) {
+      const path = this.projectPath(user, name);
+      const [contributors, languages] = await Promise.all([
+        apiFetch(`https://gitlab.com/api/v4/projects/${path}/repository/contributors?per_page=20&order_by=commits&sort=desc`).catch(() => []),
+        apiFetch(`https://gitlab.com/api/v4/projects/${path}/languages`).catch(() => ({})),
+      ]);
+      return {
+        contributors: (Array.isArray(contributors) ? contributors : []).map(c => ({
+          name: c.name, contributions: c.commits, avatar: null, url: null
+        })),
+        languages, commitActivity: [], participation: null
+      };
+    },
+  },
 
-async function fetchAllReleases(owner, repo) {
-  try {
-    return await apiFetch(`https://api.github.com/repos/${owner}/${repo}/releases?per_page=100`);
-  } catch { return []; }
-}
+  codeberg: {
+    apiBase: 'https://codeberg.org/api/v1',
+    async listRepos(user) {
+      let repos = await this.pagedRepos(`${this.apiBase}/users/${encodeURIComponent(user)}/repos`).catch(() => []);
+      if (repos.length === 0) {
+        repos = await this.pagedRepos(`${this.apiBase}/orgs/${encodeURIComponent(user)}/repos`).catch(() => []);
+      }
+      return repos.filter(r => !r.fork).map(this.normRepo);
+    },
+    async pagedRepos(baseUrl) {
+      let page = 1, all = [];
+      while (true) {
+        const batch = await apiFetch(`${baseUrl}?limit=50&page=${page}`);
+        all = all.concat(batch);
+        if (batch.length < 50) break;
+        page++;
+      }
+      return all;
+    },
+    normRepo(r) {
+      return {
+        name: r.name, description: r.description, language: r.language || null,
+        stars: r.stars_count, forks: r.forks_count, issues: r.open_issues_count,
+        watchers: r.watchers_count ?? null, updated: r.updated_at, pushed: r.updated_at,
+        created: r.created_at, url: r.html_url, homepage: r.website || null, topics: [],
+        private: !!r.private, sizeKB: r.size, branch: r.default_branch,
+        license: null, fork: r.fork
+      };
+    },
+    async getRepo(user, name) {
+      return this.normRepo(await apiFetch(`${this.apiBase}/repos/${user}/${name}`));
+    },
+    normRelease(r) {
+      return {
+        tag: r.tag_name, name: r.name, date: r.published_at, prerelease: r.prerelease,
+        assets: (r.assets || []).map(a => ({ name: a.name, size: a.size, downloads: a.download_count }))
+      };
+    },
+    async listReleases(user, name) {
+      try {
+        let page = 1, all = [];
+        while (true) {
+          const batch = await apiFetch(`${this.apiBase}/repos/${user}/${name}/releases?limit=50&page=${page}`);
+          all = all.concat(batch);
+          if (batch.length < 50) break;
+          page++;
+        }
+        return all.map(this.normRelease);
+      } catch { return []; }
+    },
+    async latestRelease(user, name) {
+      try {
+        return this.normRelease(await apiFetch(`${this.apiBase}/repos/${user}/${name}/releases/latest`));
+      } catch { return null; }
+    },
+    async extras(user, name) {
+      const languages = await apiFetch(`${this.apiBase}/repos/${user}/${name}/languages`).catch(() => ({}));
+      return { contributors: [], languages, commitActivity: [], participation: null };
+    },
+  },
+};
 
-async function fetchContributors(owner, repo) {
-  try {
-    return await apiFetch(`https://api.github.com/repos/${owner}/${repo}/contributors?per_page=20`);
-  } catch { return []; }
-}
-
-async function fetchCommitActivity(owner, repo) {
-  try {
-    return await apiFetch(`https://api.github.com/repos/${owner}/${repo}/stats/commit_activity`);
-  } catch { return []; }
-}
-
-async function fetchLanguages(owner, repo) {
-  try {
-    return await apiFetch(`https://api.github.com/repos/${owner}/${repo}/languages`);
-  } catch { return {}; }
-}
-
-async function fetchParticipation(owner, repo) {
-  try {
-    return await apiFetch(`https://api.github.com/repos/${owner}/${repo}/stats/participation`);
-  } catch { return null; }
-}
-
-// ---- SOURCEFORGE ----
+// ---- SOURCEFORGE (mirror only) ----
 
 function normalizeName(s) {
   return s.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -686,24 +874,6 @@ async function fetchSfProjects(sfUser) {
   } catch { return []; }
 }
 
-// Matches each GitHub repo to the SF project with the same normalized name (UnityGameTranslator <-> unitygametranslator)
-async function ensureSfMap(repoNames) {
-  if (!state.sfMap) state.sfMap = {};
-  if (!state.sf) return;
-  const missing = repoNames.filter(rn => !(rn in state.sfMap));
-  if (missing.length === 0) return;
-  const projects = await fetchSfProjects(state.sf);
-  missing.forEach(rn => {
-    const n = normalizeName(rn);
-    const match = projects.find(p => normalizeName(p.slug) === n || normalizeName(p.name) === n);
-    state.sfMap[rn] = match ? match.slug : null;
-  });
-}
-
-function sfProject(repoName) {
-  return (state.sfMap || {})[repoName] || null;
-}
-
 // SF download total for a folder (path = release tag) or the whole project (empty path)
 async function fetchSfDownloads(project, path = '') {
   const key = `sfdl:${project}:${path}`;
@@ -722,6 +892,72 @@ async function fetchSfDownloads(project, path = '') {
     return total;
   } catch { return 0; }
 }
+
+// ---- MIRRORS ----
+
+// Loads each mirror's project list once, then matches the given repos by normalized name
+async function resolveMirrors(repoNames) {
+  await Promise.all(state.mirrors.map(async m => {
+    if (!m.names) {
+      if (m.forge === 'sourceforge') {
+        m.names = await fetchSfProjects(m.user);
+      } else {
+        const repos = await adapters[m.forge].listRepos(m.user).catch(() => []);
+        m.names = repos.map(r => ({ name: r.name, slug: r.name }));
+      }
+      m.map = {};
+      m._rels = {};
+    }
+    repoNames.forEach(rn => {
+      if (rn in m.map) return;
+      const n = normalizeName(rn);
+      const match = m.names.find(p => normalizeName(p.slug) === n || normalizeName(p.name) === n);
+      m.map[rn] = match ? match.slug : null;
+    });
+  }));
+}
+
+// Mirrors matching a given repo: [{m, target}]
+function mirrorsOf(repoName) {
+  return state.mirrors
+    .filter(m => m.map && m.map[repoName])
+    .map(m => ({ m, target: m.map[repoName] }));
+}
+
+// Download count of one release tag on one mirror
+async function mirrorDlForTag(entry, tag) {
+  const { m, target } = entry;
+  if (m.forge === 'sourceforge') return fetchSfDownloads(target, tag);
+  // github / codeberg: fetch the mirror repo's releases once, then read tags from memory
+  if (!m._rels[target]) {
+    m._rels[target] = adapters[m.forge].listReleases(m.user, target).then(rels => {
+      const map = {};
+      rels.forEach(r => { map[r.tag] = countableAssets(r).reduce((s, a) => s + (a.downloads || 0), 0); });
+      return map;
+    });
+  }
+  const map = await m._rels[target];
+  return map[tag] || 0;
+}
+
+// All mirror contributions for a tag: [{label, forge, count}] (only counts > 0)
+async function mirrorPartsForTag(repoName, tag) {
+  const entries = mirrorsOf(repoName);
+  const counts = await Promise.all(entries.map(e => mirrorDlForTag(e, tag)));
+  return entries.map((e, i) => ({ label: FORGES[e.m.forge].label, forge: e.m.forge, count: counts[i] }))
+                .filter(p => p.count > 0);
+}
+
+function partsTotal(parts) { return parts.reduce((s, p) => s + p.count, 0); }
+
+function partsTitle(mainDl, parts) {
+  const bits = [];
+  if (mainDl !== null) bits.push(`${FORGES[state.main.forge].label}: ${mainDl}`);
+  parts.forEach(p => bits.push(`${p.label}: ${p.count}`));
+  return bits.join(' · ');
+}
+
+// ---- HELPERS ----
 
 function formatNumber(n) {
   if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
@@ -743,80 +979,65 @@ function timeAgo(d) {
   return `${Math.floor(days / 365)}y ago`;
 }
 
-function isHashAsset(name) {
-  return /(\.sha256(sum)?(\.txt)?$|^sha256sums?(\.txt)?$)/i.test(name);
-}
-
-function countableAssets(release) {
-  return (release && release.assets ? release.assets : []).filter(a => !isHashAsset(a.name));
-}
-
-function releaseDownloads(release) {
-  return countableAssets(release).reduce((sum, a) => sum + a.download_count, 0);
-}
-
-function allReleasesDownloads(releases) {
-  return releases.reduce((sum, r) => sum + releaseDownloads(r), 0);
-}
-
-// ---- RENDERING ----
+// ---- DASHBOARD ----
 
 async function renderDashboard() {
   const app = document.getElementById('app');
-  app.innerHTML = `<div class="loading"><div class="spinner"></div><span>Loading repositories for <strong>${state.gh}</strong>...</span></div>`;
+  const forge = FORGES[state.main.forge];
+  app.innerHTML = `<div class="loading"><div class="spinner"></div><span>Loading ${forge.label} repositories for <strong>${state.main.user}</strong>...</span></div>`;
 
+  let repos;
   try {
-    allRepos = await fetchAllRepos();
+    repos = await adapters[state.main.forge].listRepos(state.main.user);
   } catch (e) {
     app.innerHTML = `<div class="error-box"><h3>Error</h3><p>${e.message}</p></div>`;
     return;
   }
 
-  if (allRepos.length === 0) {
-    app.innerHTML = `<div class="error-box"><h3>No repositories found</h3><p>Check the GitHub username.</p></div>`;
+  if (repos.length === 0) {
+    app.innerHTML = `<div class="error-box"><h3>No repositories found</h3><p>Check the ${forge.label} profile.</p></div>`;
     return;
   }
 
-  // Fetch latest releases for all repos in parallel
   app.innerHTML = `<div class="loading"><div class="spinner"></div><span>Loading releases...</span></div>`;
 
-  const releasePromises = allRepos.map(r => fetchLatestRelease(state.gh, r.name));
   const [releases] = await Promise.all([
-    Promise.all(releasePromises),
-    ensureSfMap(allRepos.map(r => r.name))
+    Promise.all(repos.map(r => adapters[state.main.forge].latestRelease(state.main.user, r.name))),
+    resolveMirrors(repos.map(r => r.name))
   ]);
 
-  // SourceForge downloads of the latest release for mirrored repos
-  const sfDls = await Promise.all(allRepos.map((r, i) => {
-    const proj = sfProject(r.name);
-    if (!proj || !releases[i]) return Promise.resolve(0);
-    return fetchSfDownloads(proj, releases[i].tag_name);
-  }));
+  // Mirror downloads of each repo's latest release
+  const mirrorParts = await Promise.all(repos.map((r, i) =>
+    releases[i] ? mirrorPartsForTag(r.name, releases[i].tag) : Promise.resolve([])
+  ));
 
-  const repoData = allRepos.map((r, i) => ({
-    ...r,
-    latestRelease: releases[i],
-    ghDl: releaseDownloads(releases[i]),
-    sfDl: sfDls[i],
-    latestReleaseDl: releaseDownloads(releases[i]) + sfDls[i]
-  }));
+  const repoData = repos.map((r, i) => {
+    const mainDl = releases[i] ? releaseMainDl(releases[i]) : 0;
+    const mirrorDl = partsTotal(mirrorParts[i]);
+    return {
+      ...r,
+      latestRelease: releases[i],
+      mainDl,
+      mirrorParts: mirrorParts[i],
+      latestReleaseDl: (mainDl || 0) + mirrorDl
+    };
+  });
 
   // Global stats
-  const totalStars = repoData.reduce((s, r) => s + r.stargazers_count, 0);
-  const totalForks = repoData.reduce((s, r) => s + r.forks_count, 0);
-  const totalIssues = repoData.reduce((s, r) => s + r.open_issues_count, 0);
-  const totalWatchers = repoData.reduce((s, r) => s + r.watchers_count, 0);
+  const totalStars = repoData.reduce((s, r) => s + r.stars, 0);
+  const totalForks = repoData.reduce((s, r) => s + r.forks, 0);
+  const totalIssues = repoData.reduce((s, r) => s + r.issues, 0);
   const totalDl = repoData.reduce((s, r) => s + r.latestReleaseDl, 0);
-  const totalSf = repoData.reduce((s, r) => s + r.sfDl, 0);
+  const anyMirror = repoData.some(r => r.mirrorParts.length > 0);
+  const showDl = forge.counts || anyMirror;
   const reposWithRelease = repoData.filter(r => r.latestRelease);
   const languages = [...new Set(repoData.map(r => r.language).filter(Boolean))];
 
-  // Find most recent release across all repos
-  let mostRecentRelease = null;
-  let mostRecentRepo = null;
+  // Most recent release across all repos
+  let mostRecentRelease = null, mostRecentRepo = null;
   repoData.forEach(r => {
     if (r.latestRelease) {
-      if (!mostRecentRelease || new Date(r.latestRelease.published_at) > new Date(mostRecentRelease.published_at)) {
+      if (!mostRecentRelease || new Date(r.latestRelease.date) > new Date(mostRecentRelease.date)) {
         mostRecentRelease = r.latestRelease;
         mostRecentRepo = r;
       }
@@ -824,8 +1045,10 @@ async function renderDashboard() {
   });
 
   document.getElementById('breadcrumb').innerHTML = `
-    <img class="header-avatar" src="https://github.com/${state.gh}.png?size=64" alt="">
-    <strong>${state.gh}</strong>
+    ${state.main.forge === 'github' ? `<img class="header-avatar" src="https://github.com/${state.main.user}.png?size=64" alt="">` : ''}
+    <strong>${state.main.user}</strong>
+    <span>·</span>
+    <span>${forge.label}</span>
     <span>·</span>
     <span>${repoData.length} repos</span>
     <a onclick="navigateHome()" style="font-size:12px">(change)</a>
@@ -837,19 +1060,20 @@ async function renderDashboard() {
   if (mostRecentRelease) {
     html += `
     <div class="release-banner">
-      <div class="release-tag">${mostRecentRelease.tag_name}</div>
+      <div class="release-tag">${mostRecentRelease.tag}</div>
       <div class="release-info">
-        <div class="release-name">${mostRecentRepo.name} — ${mostRecentRelease.name || mostRecentRelease.tag_name}</div>
+        <div class="release-name">${mostRecentRepo.name} — ${mostRecentRelease.name || mostRecentRelease.tag}</div>
         <div class="release-meta">
-          <span>📅 ${formatDate(mostRecentRelease.published_at)}</span>
-          <span>⏱ ${timeAgo(mostRecentRelease.published_at)}</span>
+          <span>📅 ${formatDate(mostRecentRelease.date)}</span>
+          <span>⏱ ${timeAgo(mostRecentRelease.date)}</span>
           <span>${mostRecentRelease.prerelease ? '⚠️ Pre-release' : '✅ Stable'}</span>
         </div>
       </div>
+      ${showDl ? `
       <div class="release-downloads">
         ${formatNumber(mostRecentRepo.latestReleaseDl)}
-        <small>downloads (this release)${mostRecentRepo.sfDl > 0 ? ` — GH ${formatNumber(mostRecentRepo.ghDl)} + SF ${formatNumber(mostRecentRepo.sfDl)}` : ''}</small>
-      </div>
+        <small>downloads (this release)${mostRecentRepo.mirrorParts.length ? ` — ${partsTitle(mostRecentRepo.mainDl, mostRecentRepo.mirrorParts)}` : ''}</small>
+      </div>` : ''}
     </div>`;
   }
 
@@ -861,16 +1085,16 @@ async function renderDashboard() {
     <div class="stat-card"><div class="value">${formatNumber(totalForks)}</div><div class="label">🔀 Total Forks</div></div>
     <div class="stat-card"><div class="value">${totalIssues}</div><div class="label">🔓 Open Issues</div></div>
     <div class="stat-card highlight"><div class="value">${reposWithRelease.length}</div><div class="label">📦 Repos with a release</div></div>
-    <div class="stat-card downloads"><div class="value">${formatNumber(totalDl)}</div><div class="label">⬇️ Downloads (latest releases${totalSf > 0 ? ', GH+SF' : ''})</div></div>
-    <div class="stat-card"><div class="value">${languages.length}</div><div class="label">🌐 Languages</div></div>
+    ${showDl ? `<div class="stat-card downloads"><div class="value">${formatNumber(totalDl)}</div><div class="label">⬇️ Downloads (latest releases${anyMirror ? ', all sources' : ''})</div></div>` : ''}
+    ${languages.length ? `<div class="stat-card"><div class="value">${languages.length}</div><div class="label">🌐 Languages</div></div>` : ''}
   </div>`;
 
-  // Charts section
+  // Charts
   html += `
   <div class="charts-grid">
     <div class="chart-card"><h3>⭐ Stars per repo (Top 10)</h3><canvas id="chartStars"></canvas></div>
-    <div class="chart-card"><h3>🌐 Language breakdown</h3><canvas id="chartLangs"></canvas></div>
-    <div class="chart-card"><h3>⬇️ Downloads per repo</h3><canvas id="chartDownloads"></canvas></div>
+    ${languages.length ? `<div class="chart-card"><h3>🌐 Language breakdown</h3><canvas id="chartLangs"></canvas></div>` : ''}
+    ${showDl ? `<div class="chart-card"><h3>⬇️ Downloads per repo</h3><canvas id="chartDownloads"></canvas></div>` : ''}
     <div class="chart-card"><h3>📅 Activity (last updated)</h3><canvas id="chartActivity"></canvas></div>
   </div>`;
 
@@ -894,24 +1118,23 @@ async function renderDashboard() {
 
   app.innerHTML = html;
 
-  // Render repo cards
-  function renderRepoCards(repos) {
+  function renderRepoCards(list) {
     const grid = document.getElementById('repoGrid');
-    grid.innerHTML = repos.map(r => `
+    grid.innerHTML = list.map(r => `
       <div class="repo-card" onclick="navigateToRepo('${r.name}')">
         <div class="repo-name">${r.private ? '🔒 ' : ''}${r.name}</div>
         <div class="repo-desc">${r.description || '<em>No description</em>'}</div>
         <div class="repo-meta">
           ${r.language ? `<span><span class="lang-dot" style="background:${LANG_COLORS[r.language] || '#888'}"></span> ${r.language}</span>` : ''}
-          <span>⭐ ${formatNumber(r.stargazers_count)}</span>
-          <span>🔀 ${r.forks_count}</span>
-          <span>🔓 ${r.open_issues_count}</span>
-          <span>📅 ${timeAgo(r.updated_at)}</span>
+          <span>⭐ ${formatNumber(r.stars)}</span>
+          <span>🔀 ${r.forks}</span>
+          <span>🔓 ${r.issues}</span>
+          <span>📅 ${timeAgo(r.updated)}</span>
         </div>
         ${r.latestRelease ? `
         <div class="repo-release">
-          <span class="tag">${r.latestRelease.tag_name}</span>
-          <span class="dl" ${r.sfDl > 0 ? `title="GitHub: ${r.ghDl} · SourceForge: ${r.sfDl}"` : ''}>⬇️ ${formatNumber(r.latestReleaseDl)} downloads${r.sfDl > 0 ? ' <small style="color:var(--text2);font-weight:400">(+SF)</small>' : ''}</span>
+          <span class="tag">${r.latestRelease.tag}</span>
+          ${showDl ? `<span class="dl" ${r.mirrorParts.length ? `title="${partsTitle(r.mainDl, r.mirrorParts)}"` : ''}>⬇️ ${formatNumber(r.latestReleaseDl)} downloads${r.mirrorParts.length ? ' <small style="color:var(--text2);font-weight:400">(+mirrors)</small>' : ''}</span>` : ''}
         </div>` : ''}
       </div>
     `).join('');
@@ -923,12 +1146,12 @@ async function renderDashboard() {
     let filtered = repoData.filter(r => r.name.toLowerCase().includes(search) || (r.description || '').toLowerCase().includes(search));
     filtered.sort((a, b) => {
       switch (sort) {
-        case 'stars': return b.stargazers_count - a.stargazers_count;
-        case 'forks': return b.forks_count - a.forks_count;
-        case 'updated': return new Date(b.updated_at) - new Date(a.updated_at);
+        case 'stars': return b.stars - a.stars;
+        case 'forks': return b.forks - a.forks;
+        case 'updated': return new Date(b.updated) - new Date(a.updated);
         case 'name': return a.name.localeCompare(b.name);
         case 'downloads': return b.latestReleaseDl - a.latestReleaseDl;
-        case 'issues': return b.open_issues_count - a.open_issues_count;
+        case 'issues': return b.issues - a.issues;
       }
     });
     renderRepoCards(filtered);
@@ -938,21 +1161,16 @@ async function renderDashboard() {
   document.getElementById('sortSelect').addEventListener('change', sortAndFilter);
   sortAndFilter();
 
-  // Charts
-  const chartDefaults = {
-    color: '#8b949e',
-    borderColor: '#30363d',
-  };
-  Chart.defaults.color = chartDefaults.color;
+  Chart.defaults.color = '#8b949e';
 
   // Stars chart
-  const topStars = [...repoData].sort((a, b) => b.stargazers_count - a.stargazers_count).slice(0, 10);
+  const topStars = [...repoData].sort((a, b) => b.stars - a.stars).slice(0, 10);
   new Chart(document.getElementById('chartStars'), {
     type: 'bar',
     data: {
       labels: topStars.map(r => r.name),
       datasets: [{
-        data: topStars.map(r => r.stargazers_count),
+        data: topStars.map(r => r.stars),
         backgroundColor: '#58a6ff88',
         borderColor: '#58a6ff',
         borderWidth: 1,
@@ -970,55 +1188,59 @@ async function renderDashboard() {
   });
 
   // Languages chart
-  const langCount = {};
-  repoData.forEach(r => { if (r.language) langCount[r.language] = (langCount[r.language] || 0) + 1; });
-  const langEntries = Object.entries(langCount).sort((a, b) => b[1] - a[1]);
-  new Chart(document.getElementById('chartLangs'), {
-    type: 'doughnut',
-    data: {
-      labels: langEntries.map(e => e[0]),
-      datasets: [{
-        data: langEntries.map(e => e[1]),
-        backgroundColor: langEntries.map(e => LANG_COLORS[e[0]] || '#888'),
-        borderColor: '#161b22',
-        borderWidth: 2,
-      }]
-    },
-    options: {
-      plugins: {
-        legend: { position: 'right', labels: { boxWidth: 12, padding: 8, font: { size: 11 } } }
+  if (languages.length) {
+    const langCount = {};
+    repoData.forEach(r => { if (r.language) langCount[r.language] = (langCount[r.language] || 0) + 1; });
+    const langEntries = Object.entries(langCount).sort((a, b) => b[1] - a[1]);
+    new Chart(document.getElementById('chartLangs'), {
+      type: 'doughnut',
+      data: {
+        labels: langEntries.map(e => e[0]),
+        datasets: [{
+          data: langEntries.map(e => e[1]),
+          backgroundColor: langEntries.map(e => LANG_COLORS[e[0]] || '#888'),
+          borderColor: '#161b22',
+          borderWidth: 2,
+        }]
+      },
+      options: {
+        plugins: {
+          legend: { position: 'right', labels: { boxWidth: 12, padding: 8, font: { size: 11 } } }
+        }
       }
-    }
-  });
+    });
+  }
 
   // Downloads chart
-  const withDl = repoData.filter(r => r.latestReleaseDl > 0).sort((a, b) => b.latestReleaseDl - a.latestReleaseDl).slice(0, 10);
-  new Chart(document.getElementById('chartDownloads'), {
-    type: 'bar',
-    data: {
-      labels: withDl.map(r => r.name),
-      datasets: [{
-        data: withDl.map(r => r.latestReleaseDl),
-        backgroundColor: '#d2a8ff88',
-        borderColor: '#d2a8ff',
-        borderWidth: 1,
-        borderRadius: 4,
-      }]
-    },
-    options: {
-      indexAxis: 'y',
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { grid: { color: '#30363d33' } },
-        y: { grid: { display: false } }
+  if (showDl) {
+    const withDl = repoData.filter(r => r.latestReleaseDl > 0).sort((a, b) => b.latestReleaseDl - a.latestReleaseDl).slice(0, 10);
+    new Chart(document.getElementById('chartDownloads'), {
+      type: 'bar',
+      data: {
+        labels: withDl.map(r => r.name),
+        datasets: [{
+          data: withDl.map(r => r.latestReleaseDl),
+          backgroundColor: '#d2a8ff88',
+          borderColor: '#d2a8ff',
+          borderWidth: 1,
+          borderRadius: 4,
+        }]
+      },
+      options: {
+        indexAxis: 'y',
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid: { color: '#30363d33' } },
+          y: { grid: { display: false } }
+        }
       }
-    }
-  });
+    });
+  }
 
   // Activity chart (last updated by month)
   const months = {};
   repoData.forEach(r => {
-    const d = new Date(r.pushed_at || r.updated_at);
+    const d = new Date(r.pushed || r.updated);
     const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
     months[key] = (months[key] || 0) + 1;
   });
@@ -1053,41 +1275,44 @@ async function renderRepoDetail(repoName) {
   const app = document.getElementById('app');
   app.innerHTML = `<div class="loading"><div class="spinner"></div><span>Loading <strong>${repoName}</strong>...</span></div>`;
 
-  const owner = state.gh;
+  const forge = FORGES[state.main.forge];
+  const adapter = adapters[state.main.forge];
+  const user = state.main.user;
 
-  let repo, releases, contributors, commitActivity, languages, participation;
+  let repo, releases, extras;
   try {
-    [repo, releases, contributors, commitActivity, languages, participation] = await Promise.all([
-      apiFetch(`https://api.github.com/repos/${owner}/${repoName}`),
-      fetchAllReleases(owner, repoName),
-      fetchContributors(owner, repoName),
-      fetchCommitActivity(owner, repoName),
-      fetchLanguages(owner, repoName),
-      fetchParticipation(owner, repoName),
+    [repo, releases, extras] = await Promise.all([
+      adapter.getRepo(user, repoName),
+      adapter.listReleases(user, repoName),
+      adapter.extras(user, repoName),
+      resolveMirrors([repoName]),
     ]);
   } catch (e) {
     app.innerHTML = `<div class="error-box"><h3>Error</h3><p>${e.message}</p></div>`;
     return;
   }
 
-  // SourceForge downloads per release (SF folders are named after the release tags)
-  await ensureSfMap([repoName]);
-  const sfProj = sfProject(repoName);
-  const sfPerRelease = {};
-  let sfTotal = 0;
-  if (sfProj && releases.length > 0) {
-    const sfTotals = await Promise.all(releases.map(r => fetchSfDownloads(sfProj, r.tag_name)));
-    releases.forEach((r, i) => { sfPerRelease[r.tag_name] = sfTotals[i]; });
-    sfTotal = sfTotals.reduce((a, b) => a + b, 0);
-  }
-  const sfRelDl = r => sfPerRelease[r.tag_name] || 0;
+  const { contributors, languages, commitActivity, participation } = extras;
 
-  const totalDl = allReleasesDownloads(releases) + sfTotal;
+  // Mirror downloads per release tag
+  const relParts = {};
+  if (releases.length > 0 && mirrorsOf(repoName).length > 0) {
+    const partsList = await Promise.all(releases.map(r => mirrorPartsForTag(repoName, r.tag)));
+    releases.forEach((r, i) => relParts[r.tag] = partsList[i]);
+  }
+  const partsOf = r => relParts[r.tag] || [];
+  const combinedDl = r => (releaseMainDl(r) || 0) + partsTotal(partsOf(r));
+
+  const anyMirror = releases.some(r => partsOf(r).length > 0);
+  const showDl = forge.counts || anyMirror;
+  const mainTotal = forge.counts ? releases.reduce((s, r) => s + (releaseMainDl(r) || 0), 0) : null;
+  const mirrorTotal = releases.reduce((s, r) => s + partsTotal(partsOf(r)), 0);
+  const totalDl = (mainTotal || 0) + mirrorTotal;
   const latestRelease = releases[0] || null;
 
   document.getElementById('breadcrumb').innerHTML = `
-    <img class="header-avatar" src="https://github.com/${owner}.png?size=64" alt="">
-    <a onclick="navigateDash()">${owner}</a>
+    ${state.main.forge === 'github' ? `<img class="header-avatar" src="https://github.com/${user}.png?size=64" alt="">` : ''}
+    <a onclick="navigateDash()">${user}</a>
     <span>/</span>
     <strong>${repoName}</strong>
   `;
@@ -1104,86 +1329,73 @@ async function renderRepoDetail(repoName) {
       ${repo.homepage ? `<p style="margin-top:8px"><a href="${repo.homepage}" target="_blank">🌐 ${repo.homepage}</a></p>` : ''}
     </div>
     <div class="actions">
-      <a class="btn" href="${repo.html_url}" target="_blank">
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 0c4.42 0 8 3.58 8 8a8.013 8.013 0 0 1-5.45 7.59c-.4.08-.55-.17-.55-.38 0-.27.01-1.13.01-2.2 0-.75-.25-1.23-.54-1.48 1.78-.2 3.65-.88 3.65-3.95 0-.88-.31-1.59-.82-2.15.08-.2.36-1.02-.08-2.12 0 0-.67-.22-2.2.82-.64-.18-1.32-.27-2-.27-.68 0-1.36.09-2 .27-1.53-1.03-2.2-.82-2.2-.82-.44 1.1-.16 1.92-.08 2.12-.51.56-.82 1.28-.82 2.15 0 3.06 1.86 3.75 3.64 3.95-.23.2-.44.55-.51 1.07-.46.21-1.61.55-2.33-.66-.15-.24-.6-.83-1.23-.82-.67.01-.27.38.01.53.34.19.73.9.82 1.13.16.45.68 1.31 2.69.94 0 .67.01 1.3.01 1.49 0 .21-.15.45-.55.38A7.995 7.995 0 0 1 0 8c0-4.42 3.58-8 8-8Z"/></svg>
-        View on GitHub
-      </a>
+      <a class="btn" href="${repo.url}" target="_blank">View on ${forge.label}</a>
     </div>
   </div>`;
 
   // Stats
-  const createdDate = formatDate(repo.created_at);
-  const updatedDate = formatDate(repo.updated_at);
-  const repoSize = repo.size > 1024 ? (repo.size / 1024).toFixed(1) + ' MB' : repo.size + ' KB';
+  const repoSize = repo.sizeKB === null ? null : (repo.sizeKB > 1024 ? (repo.sizeKB / 1024).toFixed(1) + ' MB' : repo.sizeKB + ' KB');
 
   html += `
   <div class="stats-grid">
-    <div class="stat-card"><div class="value">${formatNumber(repo.stargazers_count)}</div><div class="label">⭐ Stars</div></div>
-    <div class="stat-card"><div class="value">${repo.forks_count}</div><div class="label">🔀 Forks</div></div>
-    <div class="stat-card"><div class="value">${repo.open_issues_count}</div><div class="label">🔓 Open Issues</div></div>
-    <div class="stat-card"><div class="value">${repo.subscribers_count}</div><div class="label">👁 Watchers</div></div>
+    <div class="stat-card"><div class="value">${formatNumber(repo.stars)}</div><div class="label">⭐ Stars</div></div>
+    <div class="stat-card"><div class="value">${repo.forks}</div><div class="label">🔀 Forks</div></div>
+    <div class="stat-card"><div class="value">${repo.issues}</div><div class="label">🔓 Open Issues</div></div>
+    ${repo.watchers !== null ? `<div class="stat-card"><div class="value">${repo.watchers}</div><div class="label">👁 Watchers</div></div>` : ''}
     <div class="stat-card highlight"><div class="value">${releases.length}</div><div class="label">📦 Releases</div></div>
-    <div class="stat-card downloads"><div class="value">${formatNumber(totalDl)}</div><div class="label">⬇️ Total Downloads${sfProj ? ' (GH+SF)' : ''}</div></div>
-    ${sfProj ? `<div class="stat-card downloads"><div class="value">${formatNumber(sfTotal)}</div><div class="label">⬇️ from SourceForge</div></div>` : ''}
-    <div class="stat-card"><div class="value">${repoSize}</div><div class="label">💾 Size</div></div>
-    <div class="stat-card"><div class="value">${contributors.length || '?'}</div><div class="label">👥 Contributors</div></div>
+    ${showDl ? `<div class="stat-card downloads"><div class="value">${formatNumber(totalDl)}</div><div class="label">⬇️ Total Downloads${anyMirror ? ' (all sources)' : ''}</div></div>` : ''}
+    ${anyMirror ? `<div class="stat-card downloads"><div class="value">${formatNumber(mirrorTotal)}</div><div class="label">⬇️ from mirrors</div></div>` : ''}
+    ${repoSize !== null ? `<div class="stat-card"><div class="value">${repoSize}</div><div class="label">💾 Size</div></div>` : ''}
+    ${contributors.length ? `<div class="stat-card"><div class="value">${contributors.length}</div><div class="label">👥 Contributors</div></div>` : ''}
   </div>
 
   <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
-    <div class="stat-card"><div class="value" style="font-size:16px">${createdDate}</div><div class="label">📅 Created</div></div>
-    <div class="stat-card"><div class="value" style="font-size:16px">${updatedDate}</div><div class="label">🔄 Last updated</div></div>
-    <div class="stat-card"><div class="value" style="font-size:16px">${repo.license ? repo.license.spdx_id : 'None'}</div><div class="label">📜 License</div></div>
-    <div class="stat-card"><div class="value" style="font-size:16px">${repo.default_branch}</div><div class="label">🌿 Default branch</div></div>
+    <div class="stat-card"><div class="value" style="font-size:16px">${formatDate(repo.created)}</div><div class="label">📅 Created</div></div>
+    <div class="stat-card"><div class="value" style="font-size:16px">${formatDate(repo.updated)}</div><div class="label">🔄 Last updated</div></div>
+    <div class="stat-card"><div class="value" style="font-size:16px">${repo.license || 'None'}</div><div class="label">📜 License</div></div>
+    <div class="stat-card"><div class="value" style="font-size:16px">${repo.branch || '—'}</div><div class="label">🌿 Default branch</div></div>
   </div>`;
 
   // Latest release banner
   if (latestRelease) {
-    const ghCount = releaseDownloads(latestRelease);
-    const sfCount = sfRelDl(latestRelease);
+    const mainDl = releaseMainDl(latestRelease);
+    const parts = partsOf(latestRelease);
     html += `
     <div class="release-banner">
-      <div class="release-tag">${latestRelease.tag_name}</div>
+      <div class="release-tag">${latestRelease.tag}</div>
       <div class="release-info">
-        <div class="release-name">${latestRelease.name || latestRelease.tag_name}</div>
+        <div class="release-name">${latestRelease.name || latestRelease.tag}</div>
         <div class="release-meta">
-          <span>📅 ${formatDate(latestRelease.published_at)}</span>
-          <span>⏱ ${timeAgo(latestRelease.published_at)}</span>
+          <span>📅 ${formatDate(latestRelease.date)}</span>
+          <span>⏱ ${timeAgo(latestRelease.date)}</span>
           <span>${latestRelease.prerelease ? '⚠️ Pre-release' : '✅ Stable'}</span>
         </div>
       </div>
+      ${showDl ? `
       <div class="release-downloads">
-        ${formatNumber(ghCount + sfCount)}
-        <small>downloads (latest release)${sfCount > 0 ? ` — GH ${formatNumber(ghCount)} + SF ${formatNumber(sfCount)}` : ''}</small>
-      </div>
+        ${formatNumber(combinedDl(latestRelease))}
+        <small>downloads (latest release)${parts.length ? ` — ${partsTitle(mainDl, parts)}` : ''}</small>
+      </div>` : ''}
     </div>`;
   }
 
   // Charts
   html += `<div class="charts-grid">`;
 
-  // Languages chart
-  const langEntries = Object.entries(languages);
+  const langEntries = Object.entries(languages || {});
   if (langEntries.length > 0) {
     html += `<div class="chart-card"><h3>🌐 Languages</h3><canvas id="chartLangsDetail"></canvas></div>`;
   }
-
-  // Commit activity
   if (Array.isArray(commitActivity) && commitActivity.length > 0) {
     html += `<div class="chart-card"><h3>📊 Commits (last 52 weeks)</h3><canvas id="chartCommits"></canvas></div>`;
   }
-
-  // Downloads per release
-  if (releases.length > 0) {
+  if (releases.length > 0 && showDl) {
     html += `<div class="chart-card"><h3>⬇️ Downloads per release</h3><canvas id="chartReleaseDl"></canvas></div>`;
   }
-
-  // Participation (owner vs others)
   if (participation && participation.owner) {
     html += `<div class="chart-card"><h3>👥 Participation (owner vs others)</h3><canvas id="chartParticipation"></canvas></div>`;
   }
-
-  // Downloads per asset (line chart)
-  if (releases.length > 0) {
+  if (releases.length > 0 && showDl) {
     html += `<div class="chart-card" style="grid-column: 1 / -1;"><h3>📈 Asset Downloads per Release</h3><canvas id="chartDlTimeline"></canvas></div>`;
   }
 
@@ -1196,11 +1408,11 @@ async function renderRepoDetail(repoName) {
       <div class="section-title">👥 Contributors (Top ${Math.min(contributors.length, 20)})</div>
       <div class="contributors-grid">
         ${contributors.slice(0, 20).map(c => `
-          <a class="contributor" href="${c.html_url}" target="_blank">
-            <img src="${c.avatar_url}&s=56" alt="${c.login}">
-            <span>${c.login}</span>
+          ${c.url ? `<a class="contributor" href="${c.url}" target="_blank">` : `<span class="contributor">`}
+            ${c.avatar ? `<img src="${c.avatar}&s=56" alt="${c.name}">` : `<span class="initial">${(c.name || '?').charAt(0).toUpperCase()}</span>`}
+            <span>${c.name}</span>
             <span style="color:var(--text2);font-size:11px">${c.contributions}</span>
-          </a>
+          ${c.url ? `</a>` : `</span>`}
         `).join('')}
       </div>
     </div>`;
@@ -1211,29 +1423,30 @@ async function renderRepoDetail(repoName) {
     html += `
     <div class="section">
       <div class="section-title">📦 All releases (${releases.length})</div>
+      ${!forge.counts && !anyMirror ? `<p style="color:var(--text2);font-size:13px;margin-bottom:10px">${forge.label} does not expose download counts for release assets.</p>` : ''}
       <div class="releases-list">
         ${releases.map(r => `
           <div class="release-item">
-            <span class="tag-name">${r.tag_name}</span>
-            <span class="name">${r.name || r.tag_name}</span>
-            <span class="date">${formatDate(r.published_at)}</span>
-            <span class="downloads">⬇️ ${formatNumber(releaseDownloads(r) + sfRelDl(r))}${sfRelDl(r) > 0 ? ` <small style="color:var(--text2);font-weight:400">(GH ${formatNumber(releaseDownloads(r))} · SF ${formatNumber(sfRelDl(r))})</small>` : ''}</span>
+            <span class="tag-name">${r.tag}</span>
+            <span class="name">${r.name || r.tag}</span>
+            <span class="date">${formatDate(r.date)}</span>
+            ${showDl ? `<span class="downloads">⬇️ ${formatNumber(combinedDl(r))}${partsOf(r).length ? ` <small style="color:var(--text2);font-weight:400">(${partsTitle(releaseMainDl(r), partsOf(r))})</small>` : ''}</span>` : ''}
           </div>
         `).join('')}
       </div>
     </div>`;
 
-    // Assets detail for latest release
+    // Assets of the latest release
     if (latestRelease && latestRelease.assets && latestRelease.assets.length > 0) {
       html += `
       <div class="section">
-        <div class="section-title">📎 Assets — ${latestRelease.tag_name}</div>
+        <div class="section-title">📎 Assets — ${latestRelease.tag}</div>
         <div class="releases-list">
           ${latestRelease.assets.map(a => `
             <div class="release-item">
               <span class="name" style="font-size:13px">${a.name}</span>
-              <span class="date">${(a.size / 1048576).toFixed(1)} MB</span>
-              <span class="downloads">⬇️ ${formatNumber(a.download_count)}</span>
+              ${a.size !== null ? `<span class="date">${(a.size / 1048576).toFixed(1)} MB</span>` : ''}
+              <span class="downloads">⬇️ ${a.downloads === null ? 'n/a' : formatNumber(a.downloads)}</span>
             </div>
           `).join('')}
         </div>
@@ -1243,7 +1456,7 @@ async function renderRepoDetail(repoName) {
 
   app.innerHTML = html;
 
-  // Render charts
+  // Charts rendering
   if (langEntries.length > 0) {
     const totalBytes = langEntries.reduce((s, e) => s + e[1], 0);
     new Chart(document.getElementById('chartLangsDetail'), {
@@ -1290,34 +1503,39 @@ async function renderRepoDetail(repoName) {
     });
   }
 
-  if (releases.length > 0) {
+  if (releases.length > 0 && showDl) {
     const releasesReversed = [...releases].reverse().slice(-20);
-    const dlDatasets = [{
-      label: 'GitHub',
-      data: releasesReversed.map(r => releaseDownloads(r)),
-      backgroundColor: '#d2a8ff66',
-      borderColor: '#d2a8ff',
-      borderWidth: 1,
-      borderRadius: 4,
-    }];
-    if (sfProj) {
+    const dlDatasets = [];
+    if (forge.counts) {
       dlDatasets.push({
-        label: 'SourceForge',
-        data: releasesReversed.map(r => sfRelDl(r)),
-        backgroundColor: '#ffa65766',
-        borderColor: '#ffa657',
+        label: forge.label,
+        data: releasesReversed.map(r => releaseMainDl(r) || 0),
+        backgroundColor: forge.color + '66',
+        borderColor: forge.color,
         borderWidth: 1,
         borderRadius: 4,
       });
     }
+    // One stacked dataset per mirror forge present
+    const mirrorForges = [...new Set(releases.flatMap(r => partsOf(r).map(p => p.forge)))];
+    mirrorForges.forEach(f => {
+      dlDatasets.push({
+        label: FORGES[f].label,
+        data: releasesReversed.map(r => (partsOf(r).find(p => p.forge === f) || {}).count || 0),
+        backgroundColor: FORGES[f].color + '66',
+        borderColor: FORGES[f].color,
+        borderWidth: 1,
+        borderRadius: 4,
+      });
+    });
     new Chart(document.getElementById('chartReleaseDl'), {
       type: 'bar',
       data: {
-        labels: releasesReversed.map(r => r.tag_name),
+        labels: releasesReversed.map(r => r.tag),
         datasets: dlDatasets
       },
       options: {
-        plugins: { legend: { display: !!sfProj, labels: { boxWidth: 12, font: { size: 11 } } } },
+        plugins: { legend: { display: dlDatasets.length > 1, labels: { boxWidth: 12, font: { size: 11 } } } },
         scales: {
           x: { stacked: true, grid: { display: false }, ticks: { font: { size: 10 } } },
           y: { stacked: true, grid: { color: '#30363d33' }, beginAtZero: true }
@@ -1326,11 +1544,11 @@ async function renderRepoDetail(repoName) {
     });
   }
 
-  // Asset downloads per release (line chart like gh-release-stats)
-  if (releases.length > 0) {
+  // Asset downloads per release (line chart)
+  if (releases.length > 0 && showDl) {
     const lineColors = ['#58a6ff','#3fb950','#FA4016','#d2a8ff','#e3b341','#ff7b72','#79c0ff','#7ee787','#ffa657','#bc8cff','#56d4dd','#f2cc60'];
     const sortedReleases = [...releases].reverse();
-    const labels = sortedReleases.map(r => r.tag_name);
+    const labels = sortedReleases.map(r => r.tag);
 
     // Normalize asset names to group across releases
     function normalizeAssetName(name) {
@@ -1340,52 +1558,55 @@ async function renderRepoDetail(repoName) {
         .replace(/^[-_]+|[-_]+$/g, '');
     }
 
-    // Collect unique normalized asset names (hash files excluded)
-    const normalizedSet = new Set();
-    sortedReleases.forEach(r => countableAssets(r).forEach(a => normalizedSet.add(normalizeAssetName(a.name))));
-    const assetGroups = [...normalizedSet].filter(n => n.length > 0);
+    const datasets = [];
 
-    // One line per asset group
-    const datasets = assetGroups.map((group, i) => {
-      const color = lineColors[i % lineColors.length];
-      return {
-        label: group,
-        data: sortedReleases.map(r => {
-          return countableAssets(r)
-            .filter(a => normalizeAssetName(a.name) === group)
-            .reduce((sum, a) => sum + a.download_count, 0);
-        }),
-        borderColor: color,
-        backgroundColor: color + '22',
-        pointBackgroundColor: color,
-        pointRadius: 4,
-        pointHoverRadius: 6,
-        borderWidth: 2,
-        tension: 0.2,
-        fill: false,
-      };
-    });
+    if (forge.counts) {
+      const normalizedSet = new Set();
+      sortedReleases.forEach(r => countableAssets(r).forEach(a => normalizedSet.add(normalizeAssetName(a.name))));
+      const assetGroups = [...normalizedSet].filter(n => n.length > 0);
 
-    // SourceForge line (per-release folder totals)
-    if (sfProj) {
+      assetGroups.forEach((group, i) => {
+        const color = lineColors[i % lineColors.length];
+        datasets.push({
+          label: group,
+          data: sortedReleases.map(r => {
+            return countableAssets(r)
+              .filter(a => normalizeAssetName(a.name) === group)
+              .reduce((sum, a) => sum + (a.downloads || 0), 0);
+          }),
+          borderColor: color,
+          backgroundColor: color + '22',
+          pointBackgroundColor: color,
+          pointRadius: 4,
+          pointHoverRadius: 6,
+          borderWidth: 2,
+          tension: 0.2,
+          fill: false,
+        });
+      });
+    }
+
+    // One line per mirror forge (per-release totals)
+    const mirrorForges = [...new Set(releases.flatMap(r => partsOf(r).map(p => p.forge)))];
+    mirrorForges.forEach(f => {
       datasets.push({
-        label: 'SourceForge',
-        data: sortedReleases.map(r => sfRelDl(r)),
-        borderColor: '#ffa657',
-        backgroundColor: '#ffa65722',
-        pointBackgroundColor: '#ffa657',
+        label: FORGES[f].label,
+        data: sortedReleases.map(r => (partsOf(r).find(p => p.forge === f) || {}).count || 0),
+        borderColor: FORGES[f].color,
+        backgroundColor: FORGES[f].color + '22',
+        pointBackgroundColor: FORGES[f].color,
         pointRadius: 4,
         pointHoverRadius: 6,
         borderWidth: 2,
         tension: 0.2,
         fill: false,
       });
-    }
+    });
 
-    // Add a "Total" line (GitHub + SourceForge)
+    // Total line (all sources)
     datasets.push({
       label: 'Total',
-      data: sortedReleases.map(r => releaseDownloads(r) + sfRelDl(r)),
+      data: sortedReleases.map(r => combinedDl(r)),
       borderColor: '#e6edf3',
       backgroundColor: '#e6edf322',
       pointBackgroundColor: '#e6edf3',
@@ -1428,7 +1649,7 @@ async function renderRepoDetail(repoName) {
   }
 
   if (participation && participation.owner) {
-    const labels = participation.owner.map((_, i) => `S${i+1}`);
+    const labels = participation.owner.map((_, i) => `W${i+1}`);
     new Chart(document.getElementById('chartParticipation'), {
       type: 'line',
       data: {
@@ -1467,20 +1688,27 @@ async function renderRepoDetail(repoName) {
 
 // ---- LANDING ----
 
-function parseGhUser(input) {
+// Accepts a profile URL from any supported forge, "forge:user", or a bare username (assumed GitHub)
+function parseProfile(input) {
   input = (input || '').trim();
-  const m = input.match(/github\.com\/([A-Za-z0-9-]+)/i);
-  if (m) return m[1];
+  if (!input) return null;
+  const urlPatterns = [
+    { forge: 'github',      re: /github\.com\/([A-Za-z0-9-]+)/i },
+    { forge: 'gitlab',      re: /gitlab\.com\/([A-Za-z0-9_.-]+)/i },
+    { forge: 'codeberg',    re: /codeberg\.org\/([A-Za-z0-9_.-]+)/i },
+    { forge: 'sourceforge', re: /sourceforge\.net\/u\/([A-Za-z0-9_.-]+)/i },
+  ];
+  for (const p of urlPatterns) {
+    const m = input.match(p.re);
+    if (m) return { forge: p.forge, user: m[1] };
+  }
+  const prefixed = input.match(/^(github|gitlab|codeberg|sourceforge):(.+)$/i);
+  if (prefixed && /^[A-Za-z0-9_.-]+$/.test(prefixed[2])) {
+    return { forge: prefixed[1].toLowerCase(), user: prefixed[2] };
+  }
   const clean = input.replace(/^@/, '');
-  return /^[A-Za-z0-9-]+$/.test(clean) ? clean : null;
-}
-
-function parseSfUser(input) {
-  input = (input || '').trim();
-  if (!input) return '';
-  const m = input.match(/sourceforge\.net\/u\/([A-Za-z0-9_.-]+)/i);
-  if (m) return m[1];
-  return /^[A-Za-z0-9_.-]+$/.test(input) ? input : '';
+  if (/^[A-Za-z0-9-]+$/.test(clean)) return { forge: 'github', user: clean };
+  return null;
 }
 
 function renderLanding() {
@@ -1488,19 +1716,20 @@ function renderLanding() {
   const app = document.getElementById('app');
   app.innerHTML = `
   <div class="landing">
-    <h2>📊 GitHub Release Stats</h2>
-    <p>Releases, downloads, stars and activity for any GitHub account — with SourceForge mirror downloads automatically detected and added (projects are matched by name).</p>
+    <h2>📊 ForgeStats</h2>
+    <p>Repository, release and download stats for any account on a software forge — GitHub, GitLab or Codeberg — with download counts from mirrors (GitHub, Codeberg, SourceForge) automatically detected and added. Projects are matched across forges by name.</p>
     <div class="landing-form">
-      <label>GitHub profile <span class="req">required</span></label>
-      <input type="text" id="ghInput" placeholder="https://github.com/username or username">
-      <label>SourceForge profile <span class="opt">optional — adds mirror downloads</span></label>
-      <input type="text" id="sfInput" placeholder="https://sourceforge.net/u/username/profile">
-      <label>GitHub token <span class="opt">optional</span></label>
+      <label>Main profile <span class="req">required — GitHub, GitLab or Codeberg</span></label>
+      <input type="text" id="mainInput" placeholder="https://github.com/username — or gitlab.com/…, codeberg.org/…">
+      <label>Mirror profiles <span class="opt">optional — comma separated, adds their download counts</span></label>
+      <input type="text" id="mirrorsInput" placeholder="https://sourceforge.net/u/username/profile, https://codeberg.org/username">
+      <label>GitHub token <span class="opt">optional — only used for github.com calls</span></label>
       <input type="password" id="tokenInput" placeholder="ghp_... or github_pat_..." autocomplete="off">
       <button class="btn btn-primary" id="goBtn">View stats</button>
       <p class="landing-error" id="landingError"></p>
       <p class="landing-note">🔒 <strong>Token security:</strong> this page has no backend. Your token is stored only in this browser (localStorage) and sent only to <code>api.github.com</code> — never anywhere else. It never appears in the URL. Clear the field and submit again to remove it.</p>
-      <p class="landing-note">Without a token: public repos only, 60 API requests/hour (cached 30 min). With a token: 5,000 requests/hour — and if the token belongs to the profile you enter, your <strong>private repos</strong> are included too. A fine-grained read-only token is recommended.</p>
+      <p class="landing-note">Without a token, GitHub allows 60 API requests/hour (responses are cached for 30 min). With a token: 5,000/hour — and if the token belongs to the GitHub profile you enter, your <strong>private repos</strong> are included too. A fine-grained read-only token is recommended.</p>
+      <p class="landing-note">Notes: GitLab does not expose download counts (its releases are listed without numbers, and it cannot be a mirror). SourceForge can only be used as a mirror.</p>
     </div>
   </div>`;
   document.getElementById('goBtn').addEventListener('click', submitLanding);
@@ -1510,22 +1739,41 @@ function renderLanding() {
 }
 
 function submitLanding() {
-  const gh = parseGhUser(document.getElementById('ghInput').value);
-  const sf = parseSfUser(document.getElementById('sfInput').value);
-  if (!gh) {
-    document.getElementById('landingError').textContent = 'Please enter a valid GitHub profile (link or username).';
+  const err = document.getElementById('landingError');
+  const main = parseProfile(document.getElementById('mainInput').value);
+  if (!main) {
+    err.textContent = 'Please enter a valid main profile (link or username).';
     return;
   }
+  if (!FORGES[main.forge].main) {
+    err.textContent = `${FORGES[main.forge].label} can only be used as a mirror.`;
+    return;
+  }
+  const mirrorInputs = document.getElementById('mirrorsInput').value.split(/[,\s]+/).filter(Boolean);
+  const mirrors = [];
+  for (const mi of mirrorInputs) {
+    const p = parseProfile(mi);
+    if (!p) { err.textContent = `Unrecognized mirror profile: "${mi}"`; return; }
+    if (!FORGES[p.forge].mirror) {
+      err.textContent = `${FORGES[p.forge].label} cannot be used as a mirror (no download counts).`;
+      return;
+    }
+    if (p.forge === main.forge && p.user.toLowerCase() === main.user.toLowerCase()) continue;
+    mirrors.push(p);
+  }
   const token = document.getElementById('tokenInput').value.trim();
-  try { token ? localStorage.setItem('ght_token', token) : localStorage.removeItem('ght_token'); } catch {}
-  window.location.hash = `gh=${encodeURIComponent(gh)}${sf ? `&sf=${encodeURIComponent(sf)}` : ''}`;
+  try { token ? localStorage.setItem('fgs_token', token) : localStorage.removeItem('fgs_token'); } catch {}
+  const mirrorStr = mirrors.map(m => `${m.forge}:${m.user}`).join(',');
+  window.location.hash = `main=${encodeURIComponent(`${main.forge}:${main.user}`)}${mirrorStr ? `&mirrors=${encodeURIComponent(mirrorStr)}` : ''}`;
 }
 
-// ---- NAVIGATION (shareable hash: #gh=user&sf=user&repo=name) ----
+// ---- NAVIGATION (shareable hash: #main=forge:user&mirrors=forge:user,...&repo=name) ----
 
 function baseHash() {
-  let h = `gh=${encodeURIComponent(state.gh)}`;
-  if (state.sf) h += `&sf=${encodeURIComponent(state.sf)}`;
+  let h = `main=${encodeURIComponent(`${state.main.forge}:${state.main.user}`)}`;
+  if (state.mirrors.length) {
+    h += `&mirrors=${encodeURIComponent(state.mirrors.map(m => `${m.forge}:${m.user}`).join(','))}`;
+  }
   return h;
 }
 
@@ -1533,13 +1781,26 @@ function navigateHome() { window.location.hash = ''; }
 function navigateDash() { window.location.hash = baseHash(); }
 function navigateToRepo(name) { window.location.hash = `${baseHash()}&repo=${encodeURIComponent(name)}`; }
 
+function parseRef(s) {
+  const m = (s || '').match(/^(github|gitlab|codeberg|sourceforge):([A-Za-z0-9_.-]+)$/i);
+  return m ? { forge: m[1].toLowerCase(), user: m[2] } : null;
+}
+
 function handleRoute() {
   const p = new URLSearchParams(window.location.hash.slice(1));
-  const gh = p.get('gh');
-  if (!gh) { renderLanding(); return; }
-  if (gh !== state.gh || (p.get('sf') || '') !== state.sf) state.sfMap = null;
-  state.gh = gh;
-  state.sf = p.get('sf') || '';
+  const main = parseRef(p.get('main'));
+  if (!main || !FORGES[main.forge] || !FORGES[main.forge].main) { renderLanding(); return; }
+
+  const mirrors = (p.get('mirrors') || '').split(',').map(parseRef)
+    .filter(m => m && FORGES[m.forge] && FORGES[m.forge].mirror);
+
+  const key = `${main.forge}:${main.user}|${mirrors.map(m => `${m.forge}:${m.user}`).join(',')}`;
+  if (key !== state.mirrorsKey) {
+    state.main = main;
+    state.mirrors = mirrors;
+    state.mirrorsKey = key;
+  }
+
   const repo = p.get('repo');
   if (repo) renderRepoDetail(repo); else renderDashboard();
 }
