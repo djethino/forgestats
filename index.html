@@ -656,6 +656,7 @@ const state = {
   main: null,
   mirrors: [],       // [{forge, host?, user, names, map: {repoName -> target|null}, _rels: {}}]
   key: '',
+  repoCache: {},     // repo objects from the dashboard, fallback if getRepo fails on the detail page
 };
 
 // localStorage cache (30 min): stretches anonymous API rate limits
@@ -703,8 +704,9 @@ async function apiFetch(url, isGitHub = false) {
   if (isGitHub) {
     opts.headers = { 'Accept': 'application/vnd.github.v3+json' };
     const token = getToken();
-    if (token) opts.headers['Authorization'] = `token ${token}`;
+    if (token) opts.headers['Authorization'] = `Bearer ${token}`;
   }
+  const u = new URL(url);
   let lastErr = null;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt) await new Promise(r => setTimeout(r, 800 * attempt));
@@ -712,7 +714,7 @@ async function apiFetch(url, isGitHub = false) {
     try {
       resp = await fetch(url, opts);
     } catch {
-      lastErr = new Error(`Network/CORS error while calling ${new URL(url).hostname}. This is usually a transient API failure (5xx responses carry no CORS headers) — retry in a moment. A browser extension blocking requests can also cause it.`);
+      lastErr = new Error(`Network/CORS error on ${u.hostname}${u.pathname}. This is usually a transient API failure (5xx responses carry no CORS headers) — retry in a moment. A browser extension blocking requests can also cause it.`);
       continue;
     }
     if (isGitHub) {
@@ -730,10 +732,10 @@ async function apiFetch(url, isGitHub = false) {
         throw new Error(`GitHub API rate limit reached (60 requests/hour without a token). Add a token on the home page for 5,000/hour, or retry in ~${mins} min.`);
       }
       if (resp.status >= 500) {
-        lastErr = new Error(`API ${resp.status}: ${resp.statusText} (${new URL(url).hostname}) — transient server error, retry in a moment.`);
+        lastErr = new Error(`API ${resp.status}: ${resp.statusText} on ${u.hostname}${u.pathname} — transient server error, retry in a moment.`);
         continue;
       }
-      throw new Error(`API ${resp.status}: ${resp.statusText} (${new URL(url).hostname})`);
+      throw new Error(`API ${resp.status}: ${resp.statusText} (${u.hostname}${u.pathname})`);
     }
     const data = await resp.json();
     if (useCache) cacheSet(url, data);
@@ -1241,6 +1243,9 @@ async function renderDashboard() {
 
   const privCountAll = repoData.filter(r => r.private).length;
 
+  state.repoCache = {};
+  repoData.forEach(r => { state.repoCache[r.name] = r; });
+
   // Charts of the current view, destroyed before each re-render (scope switch)
   let viewCharts = [];
   const track = c => { viewCharts.push(c); return c; };
@@ -1562,16 +1567,22 @@ async function renderRepoDetail(repoName) {
   const adapter = adapters[state.main.forge];
   const label = forgeLabel(state.main);
 
-  let repo, releases, extras;
+  let repo, releases, extras, repoErr = null;
   try {
     [repo, releases, extras] = await Promise.all([
-      adapter.getRepo(state.main, repoName),
+      // If the live repo call fails, fall back to the data already loaded by the dashboard
+      adapter.getRepo(state.main, repoName).catch(e => { repoErr = e; return state.repoCache[repoName] || null; }),
       adapter.listReleases(state.main, repoName),
       adapter.extras(state.main, repoName),
       resolveMirrors([repoName]),
     ]);
   } catch (e) {
     app.innerHTML = `<div class="error-box"><h3>Error</h3><p>${esc(e.message)}</p></div>`;
+    return;
+  }
+
+  if (!repo) {
+    app.innerHTML = `<div class="error-box"><h3>Error</h3><p>${esc(repoErr ? repoErr.message : 'Repository not found.')}</p></div>`;
     return;
   }
 
@@ -1604,6 +1615,10 @@ async function renderRepoDetail(repoName) {
   `;
 
   let html = '';
+
+  if (repoErr) {
+    html += `<p style="color:var(--yellow);font-size:12px;margin-bottom:12px">⚠️ Live repository info unavailable (${esc(repoErr.message)}) — showing data already loaded by the dashboard.</p>`;
+  }
 
   // Header
   html += `
