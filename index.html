@@ -1285,8 +1285,14 @@ async function renderDashboard() {
   const reposWithRelease = data.filter(r => r.latestRelease);
   const languages = [...new Set(data.map(r => r.language).filter(Boolean))];
 
-  // Local history snapshot (this browser only) — one series per scope
-  const hist = recordHistory(`dash:${state.key}${vis === 'all' ? '' : ':' + vis}`, { dl: totalDl, stars: totalStars });
+  // Local history snapshot (this browser only) — one series per scope.
+  // Skipped when a token is set but could not authenticate (API incident or bad token):
+  // private repos would be missing and the snapshot would understate the real totals.
+  const histKey = `dash:${state.key}${vis === 'all' ? '' : ':' + vis}`;
+  const canSnapshot = state.main.forge !== 'github' || !getToken() || state.githubAuthOwner;
+  const hist = canSnapshot
+    ? recordHistory(histKey, { dl: totalDl, stars: totalStars })
+    : (() => { try { return JSON.parse(localStorage.getItem('fgs_hist:' + histKey) || '[]'); } catch { return []; } })();
 
   // Most recent release across the scoped repos
   let mostRecentRelease = null, mostRecentRepo = null;
