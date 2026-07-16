@@ -44,7 +44,16 @@ Repository view — total downloads across all sources, with the per-release Git
 
 Without a token, GitHub allows 60 API requests/hour — enough for casual use thanks to caching. With a token you get 5,000/hour, and if the token belongs to the profile you enter, your **private repos** are included.
 
-🔒 **Security:** this page has no server. Your token is stored only in your browser's localStorage, sent only to `api.github.com`, and never appears in the URL. A [fine-grained read-only token](https://github.com/settings/personal-access-tokens/new) is recommended. To remove it, clear the field and submit again.
+### Recommended token configuration
+
+| | Rate limit boost only | Include your private repos |
+|---|---|---|
+| **Fine-grained** (recommended, truly read-only) — [create](https://github.com/settings/personal-access-tokens/new) | defaults are fine | Repository access: **All repositories** + Permissions → **Contents: Read-only** (required to read releases; Metadata is added automatically) |
+| **Classic** — [create](https://github.com/settings/tokens/new?description=ForgeStats) | no scope needed | check the **repo** scope ⚠️ it also grants *write* access — ForgeStats never writes anything, but prefer fine-grained if you can |
+
+Common pitfalls: a fine-grained token created with the defaults only sees **public** repositories; and without *Contents: Read-only* your private repos would list but show zero releases.
+
+🔒 **Security:** this page has no server. Your token is stored only in your browser's localStorage, sent only to `api.github.com`, and never appears in the URL. To remove it, clear the field and submit again.
 
 ## Mirroring conventions
 

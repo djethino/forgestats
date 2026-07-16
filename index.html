@@ -2042,7 +2042,14 @@ function renderLanding() {
       <button class="btn btn-primary" id="goBtn">View stats</button>
       <p class="landing-error" id="landingError"></p>
       <p class="landing-note">🔒 <strong>Token security:</strong> this page has no backend. Your token is stored only in this browser (localStorage) and sent only to <code>api.github.com</code> — never anywhere else. It never appears in the URL. Clear the field and submit again to remove it.</p>
-      <p class="landing-note">Without a token, GitHub allows 60 API requests/hour (responses are cached for 30 min). With a token: 5,000/hour — and if the token belongs to the GitHub profile you enter, your <strong>private repos</strong> are included too. A fine-grained read-only token is recommended — but note: to see private repos, it needs <em>Repository access: All repositories</em> (the fine-grained default only grants public ones); a classic token needs the <em>repo</em> scope.</p>
+      <p class="landing-note">Without a token, GitHub allows 60 API requests/hour (responses are cached for 30 min). With a token: 5,000/hour — and if the token belongs to the GitHub profile you enter, your <strong>private repos</strong> are included too.</p>
+      <details class="landing-note">
+        <summary style="cursor:pointer">🔧 <strong>How to create a token</strong> (fine-grained vs classic)</summary>
+        <ul style="margin:8px 0 0 18px;display:flex;flex-direction:column;gap:6px">
+          <li><strong>Fine-grained (recommended, truly read-only)</strong> — <a href="https://github.com/settings/personal-access-tokens/new" target="_blank">create one</a>. For the rate limit alone, the defaults are fine. To include your private repos: <em>Repository access → All repositories</em> (the default only grants public ones) and <em>Permissions → Contents: Read-only</em> (needed to read releases; Metadata is added automatically).</li>
+          <li><strong>Classic</strong> — <a href="https://github.com/settings/tokens/new?description=ForgeStats" target="_blank">create one</a>. No scope needed for public repos (rate limit boost only). To include your private repos: check the <em>repo</em> scope. ⚠️ The classic <em>repo</em> scope also grants <em>write</em> access — ForgeStats never writes anything, but prefer fine-grained if you can.</li>
+        </ul>
+      </details>
       <p class="landing-note">Self-hosted instances: prefix the URL with its engine — <code>gitea:https://git.example.com/username</code> or <code>gitlab:https://gitlab.example.com/username</code>.</p>
       <p class="landing-note">Each visit records a local snapshot of the numbers (in this browser only) — revisit over time and evolution charts build up automatically.</p>
       <p class="landing-note">Notes: GitLab does not expose download counts (its releases are listed without numbers, and it cannot be a mirror). SourceForge can only be used as a mirror.</p>
