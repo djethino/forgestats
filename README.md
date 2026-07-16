@@ -6,6 +6,8 @@
 
 Enter a profile link, get a full dashboard: stars, forks, releases, download counts, languages, activity. If your releases are mirrored on another forge, ForgeStats detects the matching projects automatically and **adds their download counts to your totals** — per release.
 
+![Dashboard — all repos with aggregated downloads](screenshots/allrepo.png)
+
 ## Why?
 
 Download counts are scattered. A project released on GitHub and mirrored on SourceForge or Codeberg has three partial numbers and no total. ForgeStats gives you the real one.
@@ -30,6 +32,10 @@ Download counts are scattered. A project released on GitHub and mirrored on Sour
 - **Shareable URLs.** `#main=github:user&mirrors=sourceforge:user,codeberg:user` — send your stats page to anyone.
 - **Cached.** API responses are cached in localStorage for 30 minutes to stay within anonymous rate limits.
 
+Repository view — total downloads across all sources, with the per-release GitHub/SourceForge breakdown in the stacked chart:
+
+![Repository detail — per-release downloads stacked by source](screenshots/onerepofocus.png)
+
 ## GitHub token (optional)
 
 Without a token, GitHub allows 60 API requests/hour — enough for casual use thanks to caching. With a token you get 5,000/hour, and if the token belongs to the profile you enter, your **private repos** are included.
@@ -44,6 +50,12 @@ For per-release mirror counts to match, mirrors should follow the usual conventi
 - **SourceForge mirrors:** project slug matching the repo name, files organized in folders named after the release tags (`v1.2.3/…`). This is what standard mirroring scripts produce.
 
 Unmatched projects or tags simply contribute 0 — numbers are never guessed.
+
+## Getting started
+
+No account, no install — open the [live page](https://djethino.github.io/forgestats/), paste your profile links and go:
+
+![Landing page](screenshots/entrance.png)
 
 ## Self-hosting
 
