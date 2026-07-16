@@ -1727,6 +1727,7 @@ function renderLanding() {
       <input type="password" id="tokenInput" placeholder="ghp_... or github_pat_..." autocomplete="off">
       <button class="btn btn-primary" id="goBtn">View stats</button>
       <p class="landing-error" id="landingError"></p>
+      <p class="landing-note" style="text-align:center">Or see a live example: <a href="#main=github:djethino&mirrors=sourceforge:asymptomatik">GitHub profile with a SourceForge mirror →</a></p>
       <p class="landing-note">🔒 <strong>Token security:</strong> this page has no backend. Your token is stored only in this browser (localStorage) and sent only to <code>api.github.com</code> — never anywhere else. It never appears in the URL. Clear the field and submit again to remove it.</p>
       <p class="landing-note">Without a token, GitHub allows 60 API requests/hour (responses are cached for 30 min). With a token: 5,000/hour — and if the token belongs to the GitHub profile you enter, your <strong>private repos</strong> are included too. A fine-grained read-only token is recommended.</p>
       <p class="landing-note">Notes: GitLab does not expose download counts (its releases are listed without numbers, and it cannot be a mirror). SourceForge can only be used as a mirror.</p>

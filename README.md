@@ -49,6 +49,6 @@ Unmatched projects or tags simply contribute 0 — numbers are never guessed.
 
 It's one file. Download `index.html`, put it anywhere (GitHub Pages, any static host, or open it locally). No build step, no dependencies besides Chart.js from a CDN.
 
-## Contributing
+## License
 
-Adding a forge means writing one adapter (list repos, normalize releases, count downloads) in the `adapters` object — see the existing ones as reference. Issues and PRs welcome.
+MIT. It's a small tool shared as-is — feel free to fork it, tweak it and host your own. Adding a forge means writing one adapter (list repos, normalize releases, count downloads) in the `adapters` object.
