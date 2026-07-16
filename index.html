@@ -744,11 +744,13 @@ const adapters = {
     async listRepos(p) {
       // If the provided token belongs to the requested profile, include private repos
       let baseUrl = `https://api.github.com/users/${p.user}/repos?type=public`;
+      state.githubAuthOwner = false;
       if (getToken()) {
         try {
           const me = await apiFetch('https://api.github.com/user', true);
           if (me.login && me.login.toLowerCase() === p.user.toLowerCase()) {
             baseUrl = 'https://api.github.com/user/repos?affiliation=owner';
+            state.githubAuthOwner = true;
           }
         } catch {}
       }
@@ -1220,6 +1222,7 @@ async function renderDashboard() {
   const showDl = ENGINES[state.main.forge].counts || anyMirror;
   const reposWithRelease = repoData.filter(r => r.latestRelease);
   const languages = [...new Set(repoData.map(r => r.language).filter(Boolean))];
+  const privCount = repoData.filter(r => r.private).length;
 
   // Local history snapshot (this browser only)
   const hist = recordHistory(`dash:${state.key}`, { dl: totalDl, stars: totalStars });
@@ -1294,14 +1297,22 @@ async function renderDashboard() {
   html += `
   <div class="section">
     <div class="section-title">📂 Repositories
-      <span style="font-size:11px;color:var(--text2);font-weight:400">(forks excluded)</span>
+      <span style="font-size:11px;color:var(--text2);font-weight:400">(forks excluded${privCount ? `, ${privCount} private` : ''})</span>
       <span style="margin-left:auto;display:flex;gap:6px">
         <button class="btn btn-mini" id="exportCsvBtn">⬇ CSV</button>
         <button class="btn btn-mini" id="exportJsonBtn">⬇ JSON</button>
       </span>
     </div>
+    ${state.main.forge === 'github' && state.githubAuthOwner && privCount === 0 ? `
+    <p style="color:var(--text2);font-size:12px;margin-bottom:10px">🔑 Token authenticated, but the API returned no private repositories. If you expected some: a classic token needs the <strong>repo</strong> scope; a fine-grained token needs <strong>Repository access: All repositories</strong> (the default only grants public ones).</p>` : ''}
     <div class="sort-bar">
       <input type="text" id="searchInput" placeholder="Search repositories...">
+      ${privCount ? `
+      <select id="visSelect">
+        <option value="all">👁 All repos</option>
+        <option value="public">🌐 Public only</option>
+        <option value="private">🔒 Private only</option>
+      </select>` : ''}
       <select id="sortSelect">
         <option value="stars">⭐ Stars</option>
         <option value="forks">🔀 Forks</option>
@@ -1356,7 +1367,10 @@ async function renderDashboard() {
   function sortAndFilter() {
     const search = document.getElementById('searchInput').value.toLowerCase();
     const sort = document.getElementById('sortSelect').value;
+    const visSel = document.getElementById('visSelect');
+    const vis = visSel ? visSel.value : 'all';
     let filtered = repoData.filter(r => r.name.toLowerCase().includes(search) || (r.description || '').toLowerCase().includes(search));
+    if (vis !== 'all') filtered = filtered.filter(r => (vis === 'private') === r.private);
     filtered.sort((a, b) => {
       switch (sort) {
         case 'stars': return b.stars - a.stars;
@@ -1372,6 +1386,8 @@ async function renderDashboard() {
 
   document.getElementById('searchInput').addEventListener('input', sortAndFilter);
   document.getElementById('sortSelect').addEventListener('change', sortAndFilter);
+  const visSelEl = document.getElementById('visSelect');
+  if (visSelEl) visSelEl.addEventListener('change', sortAndFilter);
   sortAndFilter();
 
   Chart.defaults.color = '#8b949e';
@@ -2026,7 +2042,7 @@ function renderLanding() {
       <button class="btn btn-primary" id="goBtn">View stats</button>
       <p class="landing-error" id="landingError"></p>
       <p class="landing-note">🔒 <strong>Token security:</strong> this page has no backend. Your token is stored only in this browser (localStorage) and sent only to <code>api.github.com</code> — never anywhere else. It never appears in the URL. Clear the field and submit again to remove it.</p>
-      <p class="landing-note">Without a token, GitHub allows 60 API requests/hour (responses are cached for 30 min). With a token: 5,000/hour — and if the token belongs to the GitHub profile you enter, your <strong>private repos</strong> are included too. A fine-grained read-only token is recommended.</p>
+      <p class="landing-note">Without a token, GitHub allows 60 API requests/hour (responses are cached for 30 min). With a token: 5,000/hour — and if the token belongs to the GitHub profile you enter, your <strong>private repos</strong> are included too. A fine-grained read-only token is recommended — but note: to see private repos, it needs <em>Repository access: All repositories</em> (the fine-grained default only grants public ones); a classic token needs the <em>repo</em> scope.</p>
       <p class="landing-note">Self-hosted instances: prefix the URL with its engine — <code>gitea:https://git.example.com/username</code> or <code>gitlab:https://gitlab.example.com/username</code>.</p>
       <p class="landing-note">Each visit records a local snapshot of the numbers (in this browser only) — revisit over time and evolution charts build up automatically.</p>
       <p class="landing-note">Notes: GitLab does not expose download counts (its releases are listed without numbers, and it cannot be a mirror). SourceForge can only be used as a mirror.</p>
