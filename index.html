@@ -329,6 +329,18 @@ header h1 svg { fill: var(--text); }
   white-space: nowrap;
 }
 
+.badge-template {
+  background: rgba(88, 166, 255, 0.08);
+  color: var(--accent);
+  border: 1px solid rgba(88, 166, 255, 0.4);
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 500;
+  padding: 1px 8px;
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
 .badge-pre {
   background: rgba(227, 179, 65, 0.12);
   color: var(--yellow);
@@ -408,6 +420,19 @@ header h1 svg { fill: var(--text); }
   flex-direction: column;
   gap: 8px;
 }
+
+.release-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.release-wrap > summary { list-style: none; cursor: pointer; }
+.release-wrap > summary::-webkit-details-marker { display: none; }
+.release-wrap .release-item { border: none; background: transparent; }
+.release-wrap[open] > summary { border-bottom: 1px solid var(--border); }
+.release-wrap .release-assets { padding: 4px 0; }
+.release-wrap .release-assets .release-item { padding: 6px 16px; }
 
 .release-item {
   background: var(--surface);
@@ -742,7 +767,8 @@ const adapters = {
         stars: r.stargazers_count, forks: r.forks_count, issues: r.open_issues_count,
         watchers: r.subscribers_count ?? null, updated: r.updated_at, pushed: r.pushed_at || r.updated_at,
         created: r.created_at, url: r.html_url, homepage: r.homepage, topics: r.topics || [],
-        private: !!r.private, archived: !!r.archived, sizeKB: r.size, branch: r.default_branch,
+        private: !!r.private, archived: !!r.archived, template: !!r.is_template,
+        sizeKB: r.size, branch: r.default_branch,
         license: r.license ? r.license.spdx_id : null, fork: r.fork
       };
     },
@@ -1147,34 +1173,50 @@ async function renderDashboard() {
 
   app.innerHTML = `<div class="loading"><div class="spinner"></div><span>Loading releases...</span></div>`;
 
-  const [releases] = await Promise.all([
-    Promise.all(repos.map(r => adapters[state.main.forge].latestRelease(state.main, r.name))),
+  // Fetching the full release list costs the same as fetching only the latest
+  // (one request per repo) and gives all-time download totals, not just the latest release's
+  const [allReleases] = await Promise.all([
+    Promise.all(repos.map(r => adapters[state.main.forge].listReleases(state.main, r.name))),
     resolveMirrors(repos.map(r => r.name))
   ]);
 
-  // Mirror downloads of each repo's latest release
-  const mirrorParts = await Promise.all(repos.map((r, i) =>
-    releases[i] ? mirrorPartsForTag(r.name, releases[i].tag) : Promise.resolve([])
-  ));
-
-  const repoData = repos.map((r, i) => {
-    const mainDl = releases[i] ? releaseMainDl(releases[i]) : 0;
-    const mirrorDl = partsTotal(mirrorParts[i]);
+  const repoData = await Promise.all(repos.map(async (r, i) => {
+    const rels = allReleases[i];
+    const latestRelease = rels[0] || null;
+    let latestParts = [], totalParts = [], mirrorTotal = 0;
+    if (rels.length && mirrorsOf(r.name).length) {
+      const partsList = await Promise.all(rels.map(rel => mirrorPartsForTag(r.name, rel.tag)));
+      latestParts = partsList[0] || [];
+      const agg = {};
+      partsList.flat().forEach(p => {
+        if (!agg[p.label]) agg[p.label] = { label: p.label, forge: p.forge, count: 0 };
+        agg[p.label].count += p.count;
+      });
+      totalParts = Object.values(agg);
+      mirrorTotal = partsTotal(totalParts);
+    }
+    const counts = ENGINES[state.main.forge].counts;
+    const mainTotalDl = counts ? rels.reduce((s, rel) => s + (releaseMainDl(rel) || 0), 0) : null;
+    const mainLatestDl = latestRelease ? releaseMainDl(latestRelease) : 0;
     return {
       ...r,
-      latestRelease: releases[i],
-      mainDl,
-      mirrorParts: mirrorParts[i],
-      latestReleaseDl: (mainDl || 0) + mirrorDl
+      releasesCount: rels.length,
+      latestRelease,
+      mainDl: mainLatestDl,
+      mirrorParts: latestParts,
+      latestReleaseDl: (mainLatestDl || 0) + partsTotal(latestParts),
+      mainTotalDl,
+      totalParts,
+      totalDl: (mainTotalDl || 0) + mirrorTotal
     };
-  });
+  }));
 
   // Global stats
   const totalStars = repoData.reduce((s, r) => s + r.stars, 0);
   const totalForks = repoData.reduce((s, r) => s + r.forks, 0);
   const totalIssues = repoData.reduce((s, r) => s + r.issues, 0);
-  const totalDl = repoData.reduce((s, r) => s + r.latestReleaseDl, 0);
-  const anyMirror = repoData.some(r => r.mirrorParts.length > 0);
+  const totalDl = repoData.reduce((s, r) => s + r.totalDl, 0);
+  const anyMirror = repoData.some(r => r.totalParts.length > 0);
   const showDl = ENGINES[state.main.forge].counts || anyMirror;
   const reposWithRelease = repoData.filter(r => r.latestRelease);
   const languages = [...new Set(repoData.map(r => r.language).filter(Boolean))];
@@ -1232,9 +1274,9 @@ async function renderDashboard() {
     <div class="stat-card"><div class="value">${repoData.length}</div><div class="label">Repositories</div></div>
     <div class="stat-card"><div class="value">${formatNumber(totalStars)}</div><div class="label">⭐ Total Stars</div></div>
     <div class="stat-card"><div class="value">${formatNumber(totalForks)}</div><div class="label">🔀 Total Forks</div></div>
-    <div class="stat-card"><div class="value">${totalIssues}</div><div class="label">🔓 Open Issues</div></div>
+    <div class="stat-card"><div class="value">${totalIssues}</div><div class="label">🔓 Open Issues${state.main.forge === 'github' ? ' + PRs' : ''}</div></div>
     <div class="stat-card highlight"><div class="value">${reposWithRelease.length}</div><div class="label">📦 Repos with a release</div></div>
-    ${showDl ? `<div class="stat-card downloads"><div class="value">${formatNumber(totalDl)}</div><div class="label">⬇️ Downloads (latest releases${anyMirror ? ', all sources' : ''})</div></div>` : ''}
+    ${showDl ? `<div class="stat-card downloads"><div class="value">${formatNumber(totalDl)}</div><div class="label">⬇️ Downloads (all releases${anyMirror ? ', all sources' : ''})</div></div>` : ''}
     ${languages.length ? `<div class="stat-card"><div class="value">${languages.length}</div><div class="label">🌐 Languages</div></div>` : ''}
   </div>`;
 
@@ -1277,11 +1319,12 @@ async function renderDashboard() {
   wireExport('exportCsvBtn', 'exportJsonBtn', `forgestats-${state.main.user}-repos`, () =>
     repoData.map(r => ({
       name: r.name, archived: r.archived, stars: r.stars, forks: r.forks, open_issues: r.issues,
-      language: r.language, updated: r.updated,
+      language: r.language, updated: r.updated, releases: r.releasesCount,
       latest_release: r.latestRelease ? r.latestRelease.tag : null,
-      main_downloads: r.mainDl,
-      mirror_downloads: partsTotal(r.mirrorParts),
-      total_downloads: r.latestReleaseDl,
+      latest_release_downloads: r.latestReleaseDl,
+      main_downloads: r.mainTotalDl,
+      mirror_downloads: partsTotal(r.totalParts),
+      total_downloads: r.totalDl,
       url: r.url
     }))
   );
@@ -1290,14 +1333,15 @@ async function renderDashboard() {
     const grid = document.getElementById('repoGrid');
     grid.innerHTML = list.map(r => `
       <div class="repo-card" onclick="navigateToRepo('${esc(r.name)}')">
-        <div class="repo-name">${esc(r.name)}${r.private ? ' <span class="badge-private">🔒 private</span>' : ''}${r.archived ? ' <span class="badge-archived">📦 archived</span>' : ''}</div>
+        <div class="repo-name">${esc(r.name)}${r.private ? ' <span class="badge-private">🔒 private</span>' : ''}${r.archived ? ' <span class="badge-archived">📦 archived</span>' : ''}${r.template ? ' <span class="badge-template">📐 template</span>' : ''}</div>
         <div class="repo-desc">${r.description ? esc(r.description) : '<em>No description</em>'}</div>
         <div class="repo-meta">
           ${r.language ? `<span><span class="lang-dot" style="background:${LANG_COLORS[r.language] || '#888'}"></span> ${esc(r.language)}</span>` : ''}
           <span>⭐ ${formatNumber(r.stars)}</span>
           <span>🔀 ${r.forks}</span>
           <span>🔓 ${r.issues}</span>
-          <span>📅 ${timeAgo(r.updated)}</span>
+          <span>📅 ${timeAgo(r.pushed || r.updated)}</span>
+          ${showDl && r.totalDl > 0 ? `<span title="All releases — ${esc(partsTitle(r.mainTotalDl, r.totalParts))}" style="color:var(--accent4);font-weight:600">⬇️ ${formatNumber(r.totalDl)} total</span>` : ''}
         </div>
         ${r.latestRelease ? `
         <div class="repo-release">
@@ -1319,7 +1363,7 @@ async function renderDashboard() {
         case 'forks': return b.forks - a.forks;
         case 'updated': return new Date(b.updated) - new Date(a.updated);
         case 'name': return a.name.localeCompare(b.name);
-        case 'downloads': return b.latestReleaseDl - a.latestReleaseDl;
+        case 'downloads': return b.totalDl - a.totalDl;
         case 'issues': return b.issues - a.issues;
       }
     });
@@ -1382,13 +1426,13 @@ async function renderDashboard() {
 
   // Downloads chart
   if (showDl) {
-    const withDl = repoData.filter(r => r.latestReleaseDl > 0).sort((a, b) => b.latestReleaseDl - a.latestReleaseDl).slice(0, 10);
+    const withDl = repoData.filter(r => r.totalDl > 0).sort((a, b) => b.totalDl - a.totalDl).slice(0, 10);
     new Chart(document.getElementById('chartDownloads'), {
       type: 'bar',
       data: {
         labels: withDl.map(r => r.name),
         datasets: [{
-          data: withDl.map(r => r.latestReleaseDl),
+          data: withDl.map(r => r.totalDl),
           backgroundColor: '#d2a8ff88',
           borderColor: '#d2a8ff',
           borderWidth: 1,
@@ -1503,7 +1547,7 @@ async function renderRepoDetail(repoName) {
   html += `
   <div class="detail-header">
     <div class="info">
-      <h2>${esc(repo.name)}${repo.private ? ' <span class="badge-private">🔒 private</span>' : ''}${repo.archived ? ' <span class="badge-archived">📦 archived</span>' : ''}</h2>
+      <h2>${esc(repo.name)}${repo.private ? ' <span class="badge-private">🔒 private</span>' : ''}${repo.archived ? ' <span class="badge-archived">📦 archived</span>' : ''}${repo.template ? ' <span class="badge-template">📐 template</span>' : ''}</h2>
       <p>${repo.description ? esc(repo.description) : 'No description'}</p>
       ${repo.topics && repo.topics.length ? `<div class="topics">${repo.topics.map(t => `<span class="topic">${esc(t)}</span>`).join('')}</div>` : ''}
       ${repo.homepage ? `<p style="margin-top:8px"><a href="${esc(repo.homepage)}" target="_blank">🌐 ${esc(repo.homepage)}</a></p>` : ''}
@@ -1520,7 +1564,7 @@ async function renderRepoDetail(repoName) {
   <div class="stats-grid">
     <div class="stat-card"><div class="value">${formatNumber(repo.stars)}</div><div class="label">⭐ Stars</div></div>
     <div class="stat-card"><div class="value">${repo.forks}</div><div class="label">🔀 Forks</div></div>
-    <div class="stat-card"><div class="value">${repo.issues}</div><div class="label">🔓 Open Issues</div></div>
+    <div class="stat-card"><div class="value">${repo.issues}</div><div class="label">🔓 Open Issues${state.main.forge === 'github' ? ' + PRs' : ''}</div></div>
     ${repo.watchers !== null ? `<div class="stat-card"><div class="value">${repo.watchers}</div><div class="label">👁 Watchers</div></div>` : ''}
     <div class="stat-card highlight"><div class="value">${releases.length}</div><div class="label">📦 Releases</div></div>
     ${showDl ? `<div class="stat-card downloads"><div class="value">${formatNumber(totalDl)}</div><div class="label">⬇️ Total Downloads${anyMirror ? ' (all sources)' : ''}</div></div>` : ''}
@@ -1531,7 +1575,7 @@ async function renderRepoDetail(repoName) {
 
   <div class="stats-grid" style="grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));">
     <div class="stat-card"><div class="value" style="font-size:16px">${formatDate(repo.created)}</div><div class="label">📅 Created</div></div>
-    <div class="stat-card"><div class="value" style="font-size:16px">${formatDate(repo.updated)}</div><div class="label">🔄 Last updated</div></div>
+    <div class="stat-card"><div class="value" style="font-size:16px">${formatDate(repo.pushed || repo.updated)}</div><div class="label">🔄 Last push</div></div>
     <div class="stat-card"><div class="value" style="font-size:16px">${repo.license ? esc(repo.license) : 'None'}</div><div class="label">📜 License</div></div>
     <div class="stat-card"><div class="value" style="font-size:16px">${repo.branch ? esc(repo.branch) : '—'}</div><div class="label">🌿 Default branch</div></div>
   </div>`;
@@ -1567,7 +1611,13 @@ async function renderRepoDetail(repoName) {
     html += `<div class="chart-card"><h3>🌐 Languages</h3><canvas id="chartLangsDetail"></canvas></div>`;
   }
   if (Array.isArray(commitActivity) && commitActivity.length > 0) {
-    html += `<div class="chart-card"><h3>📊 Commits (last 52 weeks)</h3><canvas id="chartCommits"></canvas></div>`;
+    html += `<div class="chart-card"><h3 style="display:flex;align-items:center;gap:8px">📊 Commits
+      <select id="commitRange" style="margin-left:auto;background:var(--surface2);border:1px solid var(--border);color:var(--text);font-size:11px;border-radius:6px;padding:2px 6px;cursor:pointer">
+        <option value="52">last 52 weeks</option>
+        <option value="26">last 26 weeks</option>
+        <option value="13">last 13 weeks</option>
+        <option value="4">last 4 weeks</option>
+      </select></h3><canvas id="chartCommits"></canvas></div>`;
   }
   if (releases.length > 0 && showDl) {
     html += `<div class="chart-card"><h3>⬇️ Downloads per release</h3><canvas id="chartReleaseDl"></canvas></div>`;
@@ -1613,33 +1663,29 @@ async function renderRepoDetail(repoName) {
       </div>
       ${!engine.counts && !anyMirror ? `<p style="color:var(--text2);font-size:13px;margin-bottom:10px">${esc(label)} does not expose download counts for release assets.</p>` : ''}
       <div class="releases-list">
-        ${releases.map(r => `
-          <div class="release-item">
+        ${releases.map(r => {
+          const row = `
             <span class="tag-name">${esc(r.tag)}</span>
             <span class="name">${esc(r.name || r.tag)}${r.prerelease ? ' <span class="badge-pre">⚠️ pre-release</span>' : ''}</span>
             <span class="date">${formatDate(r.date)}</span>
-            ${showDl ? `<span class="downloads">⬇️ ${formatNumber(combinedDl(r))}${partsOf(r).length ? ` <small style="color:var(--text2);font-weight:400">(${esc(partsTitle(releaseMainDl(r), partsOf(r)))})</small>` : ''}</span>` : ''}
-          </div>
-        `).join('')}
+            ${showDl ? `<span class="downloads">⬇️ ${formatNumber(combinedDl(r))}${partsOf(r).length ? ` <small style="color:var(--text2);font-weight:400">(${esc(partsTitle(releaseMainDl(r), partsOf(r)))})</small>` : ''}</span>` : ''}`;
+          if (!r.assets.length) return `<div class="release-item">${row}</div>`;
+          return `
+          <details class="release-wrap">
+            <summary><div class="release-item">${row}<span style="color:var(--text2);font-size:11px">📎 ${r.assets.length} assets ▾</span></div></summary>
+            <div class="release-assets">
+              ${r.assets.map(a => `
+                <div class="release-item">
+                  <span class="name" style="font-size:13px">${esc(a.name)}</span>
+                  ${a.size !== null ? `<span class="date">${(a.size / 1048576).toFixed(1)} MB</span>` : ''}
+                  <span class="downloads">⬇️ ${a.downloads === null ? 'n/a' : formatNumber(a.downloads)}</span>
+                </div>
+              `).join('')}
+            </div>
+          </details>`;
+        }).join('')}
       </div>
     </div>`;
-
-    // Assets of the latest release
-    if (latestRelease && latestRelease.assets && latestRelease.assets.length > 0) {
-      html += `
-      <div class="section">
-        <div class="section-title">📎 Assets — ${esc(latestRelease.tag)}</div>
-        <div class="releases-list">
-          ${latestRelease.assets.map(a => `
-            <div class="release-item">
-              <span class="name" style="font-size:13px">${esc(a.name)}</span>
-              ${a.size !== null ? `<span class="date">${(a.size / 1048576).toFixed(1)} MB</span>` : ''}
-              <span class="downloads">⬇️ ${a.downloads === null ? 'n/a' : formatNumber(a.downloads)}</span>
-            </div>
-          `).join('')}
-        </div>
-      </div>`;
-    }
   }
 
   app.innerHTML = html;
@@ -1675,30 +1721,44 @@ async function renderRepoDetail(repoName) {
   }
 
   if (Array.isArray(commitActivity) && commitActivity.length > 0) {
-    const weeks = commitActivity.slice(-52);
-    new Chart(document.getElementById('chartCommits'), {
-      type: 'bar',
-      data: {
-        labels: weeks.map(w => {
-          const d = new Date(w.week * 1000);
-          return `${d.getDate()}/${d.getMonth()+1}`;
-        }),
-        datasets: [{
-          data: weeks.map(w => w.total),
-          backgroundColor: '#58a6ff66',
-          borderColor: '#58a6ff',
-          borderWidth: 1,
-          borderRadius: 2,
-        }]
-      },
-      options: {
-        plugins: { legend: { display: false } },
-        scales: {
-          x: { grid: { display: false }, ticks: { maxTicksLimit: 12, font: { size: 10 } } },
-          y: { grid: { color: '#30363d33' }, beginAtZero: true }
-        }
+    // The GitHub API returns a fixed 52-week window; the selector filters it client-side
+    let commitsChart = null;
+    const renderCommits = (n) => {
+      const weeks = commitActivity.slice(-n);
+      const labels = weeks.map(w => {
+        const d = new Date(w.week * 1000);
+        return `${d.getDate()}/${d.getMonth()+1}`;
+      });
+      const data = weeks.map(w => w.total);
+      if (commitsChart) {
+        commitsChart.data.labels = labels;
+        commitsChart.data.datasets[0].data = data;
+        commitsChart.update();
+        return;
       }
-    });
+      commitsChart = new Chart(document.getElementById('chartCommits'), {
+        type: 'bar',
+        data: {
+          labels,
+          datasets: [{
+            data,
+            backgroundColor: '#58a6ff66',
+            borderColor: '#58a6ff',
+            borderWidth: 1,
+            borderRadius: 2,
+          }]
+        },
+        options: {
+          plugins: { legend: { display: false } },
+          scales: {
+            x: { grid: { display: false }, ticks: { maxTicksLimit: 12, font: { size: 10 } } },
+            y: { grid: { color: '#30363d33' }, beginAtZero: true }
+          }
+        }
+      });
+    };
+    renderCommits(52);
+    document.getElementById('commitRange').addEventListener('change', e => renderCommits(parseInt(e.target.value, 10)));
   }
 
   if (releases.length > 0 && showDl) {
