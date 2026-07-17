@@ -620,6 +620,12 @@ header h1 svg { fill: var(--text); }
   </div>
 </header>
 
+<div id="degradedBanner" style="display:none;background:rgba(227,179,65,.08);border-bottom:1px solid rgba(227,179,65,.35);color:var(--yellow);font-size:12px;line-height:1.5;padding:8px 20px;text-align:center">
+  ⚠️ GitHub API seems degraded right now — some data may be temporarily missing or served without authentication (private repos hidden, history snapshots paused).
+  Check <a href="https://www.githubstatus.com" target="_blank">githubstatus.com</a> · No incident listed? A browser extension may be blocking requests — try a hard refresh (Ctrl+Shift+R) or a private window.
+  <a onclick="dismissDegraded()" style="cursor:pointer;margin-left:10px;color:var(--text2)" title="Dismiss">✕</a>
+</div>
+
 <main class="container" id="app">
   <div class="loading">
     <div class="spinner"></div>
@@ -698,6 +704,20 @@ function setVisFilter(v) {
 // are retried once anonymously: public data still loads when GitHub rejects the token.
 const memCache = new Map();
 
+// Discreet warning banner when GitHub keeps failing (incident, or blocking extension)
+function noteDegraded() {
+  state.degradedGitHub = true;
+  try { if (sessionStorage.getItem('fgs_deg_dismissed')) return; } catch {}
+  const el = document.getElementById('degradedBanner');
+  if (el) el.style.display = 'block';
+}
+
+function dismissDegraded() {
+  try { sessionStorage.setItem('fgs_deg_dismissed', '1'); } catch {}
+  const el = document.getElementById('degradedBanner');
+  if (el) el.style.display = 'none';
+}
+
 async function apiFetch(url, isGitHub = false) {
   if (memCache.has(url)) return memCache.get(url);
   const useCache = !(isGitHub && getToken());
@@ -754,10 +774,12 @@ async function apiFetch(url, isGitHub = false) {
       if (r2.ok) {
         const d2 = await r2.json();
         memCache.set(url, d2);
+        noteDegraded();
         return d2;
       }
     } catch {}
   }
+  if (isGitHub) noteDegraded();
   throw lastErr;
 }
 
