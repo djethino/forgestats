@@ -433,6 +433,12 @@ header h1 svg { fill: var(--text); }
 .release-wrap[open] > summary { border-bottom: 1px solid var(--border); }
 .release-wrap .release-assets { padding: 4px 0; }
 .release-wrap .release-assets .release-item { padding: 6px 16px; }
+/* Checksum files: shown for reference, greyed out because no total includes them */
+.release-wrap .release-assets .release-item.asset-skipped { opacity: 0.5; }
+.badge-skip {
+  font-size: 10px; color: var(--text2); border: 1px solid var(--border);
+  border-radius: 4px; padding: 1px 5px; margin-left: 6px; white-space: nowrap;
+}
 
 .release-item {
   background: var(--surface);
@@ -668,12 +674,17 @@ const state = {
 // localStorage cache (30 min): stretches anonymous API rate limits
 const CACHE_TTL = 30 * 60 * 1000;
 
-function cacheGet(key) {
+// SourceForge recomputes its download stats only a few times a day (the JSON
+// carries a `stats_updated` timestamp), while the per-file breakdown costs one
+// request per asset. A longer TTL keeps reloading a release list cheap.
+const SF_STATS_TTL = 3 * 60 * 60 * 1000;
+
+function cacheGet(key, ttl = CACHE_TTL) {
   try {
     const raw = localStorage.getItem('fgs:' + key);
     if (!raw) return null;
     const { t, v } = JSON.parse(raw);
-    if (Date.now() - t > CACHE_TTL) return null;
+    if (Date.now() - t > ttl) return null;
     return v;
   } catch { return null; }
 }
@@ -1032,23 +1043,51 @@ async function fetchSfProjects(sfUser) {
   } catch { return []; }
 }
 
-// SF download total for a folder (path = release tag) or the whole project (empty path)
+// Counting SourceForge per file means one request per asset instead of one per
+// release, so a busy dashboard can queue hundreds of them. This bounded queue
+// keeps a lid on concurrent connections to a host we don't own.
+const SF_CONCURRENCY = 8;
+const sfQueue = { active: 0, waiting: [] };
+
+// Assets that exist on the main forge but not on the mirror (a release mirrored
+// only in part, or not yet mirrored at all) answer with a redirect, so there is
+// nothing to persist. Remembering them for the session avoids re-querying every
+// missing file on each render; keeping it out of localStorage means a reload
+// retries them, so a SourceForge outage can't freeze counts at zero.
+const sfMissing = new Set();
+
+function sfAcquire() {
+  if (sfQueue.active < SF_CONCURRENCY) { sfQueue.active++; return Promise.resolve(); }
+  return new Promise(resolve => sfQueue.waiting.push(resolve));
+}
+
+function sfRelease() {
+  const next = sfQueue.waiting.shift();
+  if (next) next(); else sfQueue.active--;
+}
+
+// SF download total for a path under the project's file tree: '' for the whole
+// project, 'tag' for a release folder, 'tag/filename' for a single file.
 async function fetchSfDownloads(project, path = '') {
   const key = `sfdl:${project}:${path}`;
-  const cached = cacheGet(key);
+  const cached = cacheGet(key, SF_STATS_TTL);
   if (cached !== null) return cached;
+  if (sfMissing.has(key)) return 0;
+  await sfAcquire();
   try {
     const end = new Date().toISOString().slice(0, 10);
-    const folder = path ? encodeURIComponent(path) + '/' : '';
+    // Each segment is encoded on its own so that the path separators survive
+    const folder = path ? path.split('/').map(encodeURIComponent).join('/') + '/' : '';
     const url = `https://sourceforge.net/projects/${project}/files/${folder}stats/json?start_date=2000-01-01&end_date=${end}`;
-    // redirect: 'error' — a missing SF folder redirects (301) to the HTML files page
+    // redirect: 'error' — a missing SF file or folder redirects (301) to the HTML files page
     const resp = await fetch(url, { redirect: 'error' });
-    if (!resp.ok) return 0;
+    if (!resp.ok) { sfMissing.add(key); return 0; }
     const data = await resp.json();
     const total = data.total || 0;
     cacheSet(key, total);
     return total;
-  } catch { return 0; }
+  } catch { sfMissing.add(key); return 0; }
+  finally { sfRelease(); }
 }
 
 // ---- MIRRORS ----
@@ -1082,28 +1121,57 @@ function mirrorsOf(repoName) {
     .map(m => ({ m, target: m.map[repoName] }));
 }
 
-// Download count of one release tag on one mirror
-async function mirrorDlForTag(entry, tag) {
+// Downloads of one release tag on one mirror, broken down per asset file:
+// {total, byAsset: {assetName: count}}. `assetNames` is the countable asset list
+// of the main forge's release, which defines the perimeter being compared.
+async function mirrorDlForTag(entry, tag, assetNames) {
   const { m, target } = entry;
-  if (m.forge === 'sourceforge') return fetchSfDownloads(target, tag);
+  if (m.forge === 'sourceforge') {
+    // SourceForge only exposes a total per folder, which lumps in checksum files,
+    // any README and its auto-generated source archives — none of which the main
+    // forge counts as release assets. Asking for each asset by name is the only
+    // way to compare like with like (SF has no CORS-enabled file listing, so the
+    // names have to come from the main forge).
+    if (!assetNames.length) return { total: 0, byAsset: {} };
+    const counts = await Promise.all(assetNames.map(n => fetchSfDownloads(target, `${tag}/${n}`)));
+    const byAsset = {};
+    assetNames.forEach((n, i) => { if (counts[i]) byAsset[n] = counts[i]; });
+    return { total: counts.reduce((s, c) => s + c, 0), byAsset };
+  }
   // github / gitea: fetch the mirror repo's releases once, then read tags from memory
   if (!m._rels[target]) {
     m._rels[target] = adapters[m.forge].listReleases(m, target).then(rels => {
       const map = {};
-      rels.forEach(r => { map[r.tag] = countableAssets(r).reduce((s, a) => s + (a.downloads || 0), 0); });
+      rels.forEach(r => {
+        const byAsset = {};
+        let total = 0;
+        countableAssets(r).forEach(a => {
+          byAsset[a.name] = (byAsset[a.name] || 0) + (a.downloads || 0);
+          total += a.downloads || 0;
+        });
+        map[r.tag] = { total, byAsset };
+      });
       return map;
     });
   }
   const map = await m._rels[target];
-  return map[tag] || 0;
+  return map[tag] || { total: 0, byAsset: {} };
 }
 
-// All mirror contributions for a tag: [{label, forge, count}] (only counts > 0)
-async function mirrorPartsForTag(repoName, tag) {
+// All mirror contributions for a release: [{label, forge, count, byAsset}] (only counts > 0)
+async function mirrorPartsForRelease(repoName, release) {
   const entries = mirrorsOf(repoName);
-  const counts = await Promise.all(entries.map(e => mirrorDlForTag(e, tag)));
-  return entries.map((e, i) => ({ label: forgeLabel(e.m), forge: e.m.forge, count: counts[i] }))
+  if (!entries.length) return [];
+  const assetNames = countableAssets(release).map(a => a.name);
+  const res = await Promise.all(entries.map(e => mirrorDlForTag(e, release.tag, assetNames)));
+  return entries.map((e, i) => ({ label: forgeLabel(e.m), forge: e.m.forge, count: res[i].total, byAsset: res[i].byAsset }))
                 .filter(p => p.count > 0);
+}
+
+// Per-asset mirror contributions for one asset name: [{label, count}]
+function assetParts(parts, assetName) {
+  return parts.filter(p => p.byAsset && p.byAsset[assetName])
+              .map(p => ({ label: p.label, count: p.byAsset[assetName] }));
 }
 
 function partsTotal(parts) { return parts.reduce((s, p) => s + p.count, 0); }
@@ -1254,7 +1322,7 @@ async function renderDashboard() {
     const latestRelease = rels[0] || null;
     let latestParts = [], totalParts = [], mirrorTotal = 0;
     if (rels.length && mirrorsOf(r.name).length) {
-      const partsList = await Promise.all(rels.map(rel => mirrorPartsForTag(r.name, rel.tag)));
+      const partsList = await Promise.all(rels.map(rel => mirrorPartsForRelease(r.name, rel)));
       latestParts = partsList[0] || [];
       const agg = {};
       partsList.flat().forEach(p => {
@@ -1636,7 +1704,7 @@ async function renderRepoDetail(repoName) {
   // Mirror downloads per release tag
   const relParts = {};
   if (releases.length > 0 && mirrorsOf(repoName).length > 0) {
-    const partsList = await Promise.all(releases.map(r => mirrorPartsForTag(repoName, r.tag)));
+    const partsList = await Promise.all(releases.map(r => mirrorPartsForRelease(repoName, r)));
     releases.forEach((r, i) => relParts[r.tag] = partsList[i]);
   }
   const partsOf = r => relParts[r.tag] || [];
@@ -1792,17 +1860,29 @@ async function renderRepoDetail(repoName) {
             <span class="date">${formatDate(r.date)}</span>
             ${showDl ? `<span class="downloads">⬇️ ${formatNumber(combinedDl(r))}${partsOf(r).length ? ` <small style="color:var(--text2);font-weight:400">(${esc(partsTitle(releaseMainDl(r), partsOf(r)))})</small>` : ''}</span>` : ''}`;
           if (!r.assets.length) return `<div class="release-item">${row}</div>`;
+          const countedCount = countableAssets(r).length;
+          const skippedCount = r.assets.length - countedCount;
           return `
           <details class="release-wrap">
-            <summary><div class="release-item">${row}<span style="color:var(--text2);font-size:11px">📎 ${r.assets.length} assets ▾</span></div></summary>
+            <summary><div class="release-item">${row}<span style="color:var(--text2);font-size:11px">📎 ${countedCount} assets${skippedCount ? ` +${skippedCount} not counted` : ''} ▾</span></div></summary>
             <div class="release-assets">
-              ${r.assets.map(a => `
-                <div class="release-item">
-                  <span class="name" style="font-size:13px">${esc(a.name)}</span>
+              ${r.assets.map(a => {
+                // Checksums are listed for reference but excluded from every total,
+                // on the main forge and on the mirrors alike
+                const skipped = isHashAsset(a.name);
+                const aParts = skipped ? [] : assetParts(partsOf(r), a.name);
+                const aMain = a.downloads === null ? null : a.downloads;
+                const aTotal = (aMain || 0) + partsTotal(aParts);
+                const dl = aMain === null && !aParts.length
+                  ? 'n/a'
+                  : `${formatNumber(skipped ? (aMain || 0) : aTotal)}${aParts.length ? ` <small style="color:var(--text2);font-weight:400">(${esc(partsTitle(aMain, aParts))})</small>` : ''}`;
+                return `
+                <div class="release-item${skipped ? ' asset-skipped' : ''}">
+                  <span class="name" style="font-size:13px">${esc(a.name)}${skipped ? ' <span class="badge-skip">not counted</span>' : ''}</span>
                   ${a.size !== null ? `<span class="date">${(a.size / 1048576).toFixed(1)} MB</span>` : ''}
-                  <span class="downloads">⬇️ ${a.downloads === null ? 'n/a' : formatNumber(a.downloads)}</span>
-                </div>
-              `).join('')}
+                  <span class="downloads">⬇️ ${dl}</span>
+                </div>`;
+              }).join('')}
             </div>
           </details>`;
         }).join('')}
