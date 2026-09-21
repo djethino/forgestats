@@ -735,6 +735,7 @@ const state = {
   links: [],         // manual repo -> mirror associations, stored per main profile: [{repo, raw, none?} | {repo, raw, m, target, tpl?}]
   linkMirrors: {},   // mirror objects created by links, by refString (keeps their release cache)
   key: '',
+  partial: new Set(),  // release lists loaded only in part during the current render (see notePartial)
   repoCache: {},     // repo objects from the dashboard, fallback if getRepo fails on the detail page
 };
 
@@ -915,6 +916,33 @@ function applyPrCounts(repos, counts) {
 // "PRs" or "MRs": GitLab calls them merge requests
 function prWord() { return state.main && state.main.forge === 'gitlab' ? 'MRs' : 'PRs'; }
 
+// Every page of a paged list, normalized. `fetchPage(page)` returns one page; the list ends
+// on a page shorter than `size`. A page that fails ends it early and marks the result
+// `incomplete`, so what is built on it can say it is partial instead of undercounting.
+async function fetchAllPages(fetchPage, size, norm = x => x) {
+  const all = [];
+  let incomplete = false;
+  for (let page = 1; ; page++) {
+    let batch;
+    try { batch = await fetchPage(page); } catch { incomplete = true; break; }
+    if (!Array.isArray(batch)) { incomplete = true; break; }
+    all.push(...batch);
+    if (batch.length < size) break;
+  }
+  const out = all.map(norm);
+  out.incomplete = incomplete;
+  return out;
+}
+
+// Release lists that could not be loaded in full during the current render: shown as a
+// warning, since the totals built on them are partial
+function notePartial(what) { state.partial.add(what); }
+
+function partialWarningHtml() {
+  if (!state.partial.size) return '';
+  return `<p style="color:var(--yellow);font-size:12px;margin-bottom:12px">⚠️ Some release lists could not be loaded in full (API limit or error), so their download totals are partial: ${esc([...state.partial].join(', '))}. Reload in a moment${state.main.forge === 'github' && !getToken() ? ', or add a GitHub token on the home page' : ''}.</p>`;
+}
+
 // ---- ADAPTERS (each method takes a profile object p = {forge, host?, user}) ----
 
 const adapters = {
@@ -985,10 +1013,9 @@ const adapters = {
       };
     },
     async listReleases(p, name) {
-      try {
-        const rels = await apiFetch(`https://api.github.com/repos/${p.user}/${name}/releases?per_page=100`, true);
-        return rels.map(this.normRelease);
-      } catch { return []; }
+      return fetchAllPages(
+        page => apiFetch(`https://api.github.com/repos/${p.user}/${name}/releases?per_page=100&page=${page}`, true),
+        100, r => this.normRelease(r));
     },
     async latestRelease(p, name) {
       try {
@@ -1078,10 +1105,9 @@ const adapters = {
       };
     },
     async listReleases(p, name) {
-      try {
-        const rels = await apiFetch(`${this.api(p)}/projects/${this.projectPath(p, name)}/releases?per_page=100`);
-        return rels.map(r => this.normRelease(r));
-      } catch { return []; }
+      return fetchAllPages(
+        page => apiFetch(`${this.api(p)}/projects/${this.projectPath(p, name)}/releases?per_page=100&page=${page}`),
+        100, r => this.normRelease(r));
     },
     async latestRelease(p, name) {
       const rels = await this.listReleases(p, name);
@@ -1105,21 +1131,25 @@ const adapters = {
   gitea: {
     api(p) { return `https://${p.host}/api/v1`; },
     async listRepos(p) {
-      let repos = await this.pagedRepos(`${this.api(p)}/users/${encodeURIComponent(p.user)}/repos`).catch(() => []);
+      let repos = await this.pagedRepos(`${this.api(p)}/users/${encodeURIComponent(p.user)}/repos`, p).catch(() => []);
       if (repos.length === 0) {
-        repos = await this.pagedRepos(`${this.api(p)}/orgs/${encodeURIComponent(p.user)}/repos`).catch(() => []);
+        repos = await this.pagedRepos(`${this.api(p)}/orgs/${encodeURIComponent(p.user)}/repos`, p).catch(() => []);
       }
       return repos.filter(r => !r.fork).map(this.normRepo);
     },
-    async pagedRepos(baseUrl) {
-      let page = 1, all = [];
-      while (true) {
-        const batch = await apiFetch(`${baseUrl}?limit=50&page=${page}`);
-        all = all.concat(batch);
-        if (batch.length < 50) break;
-        page++;
-      }
-      return all;
+    // Items per page: an instance may cap it below the 50 asked for, and a short page
+    // would then pass for the last one. Its API settings say what the cap is.
+    async pageSize(p) {
+      try {
+        const s = await apiFetch(`${this.api(p)}/settings/api`);
+        return Math.max(1, Math.min(50, s.max_response_items || 50));
+      } catch { return 50; }
+    },
+    async pagedRepos(baseUrl, p) {
+      const size = await this.pageSize(p);
+      const repos = await fetchAllPages(page => apiFetch(`${baseUrl}?limit=${size}&page=${page}`), size);
+      if (repos.incomplete && !repos.length) throw new Error('Repository list unavailable');
+      return repos;
     },
     normRepo(r) {
       return {
@@ -1142,16 +1172,10 @@ const adapters = {
       };
     },
     async listReleases(p, name) {
-      try {
-        let page = 1, all = [];
-        while (true) {
-          const batch = await apiFetch(`${this.api(p)}/repos/${p.user}/${name}/releases?limit=50&page=${page}`);
-          all = all.concat(batch);
-          if (batch.length < 50) break;
-          page++;
-        }
-        return all.map(this.normRelease);
-      } catch { return []; }
+      const size = await this.pageSize(p);
+      return fetchAllPages(
+        page => apiFetch(`${this.api(p)}/repos/${p.user}/${name}/releases?limit=${size}&page=${page}`),
+        size, r => this.normRelease(r));
     },
     async latestRelease(p, name) {
       try {
@@ -1307,6 +1331,8 @@ async function mirrorDlForTag(entry, tag, assetNames) {
   // github / gitea: fetch the mirror repo's releases once, then read tags from memory
   if (!m._rels[target]) {
     m._rels[target] = adapters[m.forge].listReleases(m, target).then(rels => {
+      m._relsIncomplete = m._relsIncomplete || {};
+      m._relsIncomplete[target] = !!rels.incomplete;
       const map = {};
       rels.forEach(r => {
         const byAsset = {};
@@ -1321,6 +1347,8 @@ async function mirrorDlForTag(entry, tag, assetNames) {
     });
   }
   const map = await m._rels[target];
+  // Said on every render: the release list is cached, the warning is not
+  if (m._relsIncomplete && m._relsIncomplete[target]) notePartial(`${forgeLabel(m)} mirror ${m.user}/${target}`);
   return map[tag] || { total: 0, byAsset: {} };
 }
 
@@ -1734,12 +1762,14 @@ async function renderDashboard() {
   // Fetching the full release list costs the same as fetching only the latest
   // (one request per repo) and gives all-time download totals, not just the latest release's
   const mainAdapter = adapters[state.main.forge];
+  state.partial = new Set();
   const [allReleases, prCounts] = await Promise.all([
     Promise.all(repos.map(r => mainAdapter.listReleases(state.main, r.name))),
     mainAdapter.openPrCounts ? mainAdapter.openPrCounts(state.main, repos.map(r => r.name)) : null,
     resolveMirrors(repos.map(r => r.name))
   ]);
   applyPrCounts(repos, prCounts);
+  repos.forEach((r, i) => { if (allReleases[i].incomplete) notePartial(r.name); });
 
   const repoData = await Promise.all(repos.map(async (r, i) => {
     const rels = allReleases[i];
@@ -1827,7 +1857,7 @@ async function renderDashboard() {
     <a onclick="navigateHome()" style="font-size:12px">(change)</a>
   `;
 
-  let html = configPanelHtml();
+  let html = configPanelHtml() + partialWarningHtml();
 
   // Global scope selector (shown only when private repos are loaded)
   if (privCountAll) {
@@ -2105,6 +2135,30 @@ async function renderDashboard() {
 
 // ---- DETAIL PAGE ----
 
+// "All releases" shows this many rows, then more on demand (charts and totals always use all)
+const REL_LIST_PAGE = 20;
+
+function wireReleaseMore() {
+  const box = document.getElementById('relMore');
+  if (!box) return;
+  const hidden = () => document.querySelectorAll('.releases-list > [data-more][hidden]');
+  const more = document.getElementById('relMoreBtn');
+  const refresh = () => {
+    const left = hidden().length;
+    if (!left) { box.hidden = true; return; }
+    more.textContent = `Show ${Math.min(REL_LIST_PAGE, left)} more`;
+  };
+  more.addEventListener('click', () => {
+    [...hidden()].slice(0, REL_LIST_PAGE).forEach(el => { el.hidden = false; });
+    refresh();
+  });
+  document.getElementById('relAllBtn').addEventListener('click', () => {
+    hidden().forEach(el => { el.hidden = false; });
+    refresh();
+  });
+  refresh();
+}
+
 async function renderRepoDetail(repoName) {
   const app = document.getElementById('app');
   app.innerHTML = `<div class="loading"><div class="spinner"></div><span>Loading <strong>${esc(repoName)}</strong>...</span></div>`;
@@ -2113,6 +2167,7 @@ async function renderRepoDetail(repoName) {
   const adapter = adapters[state.main.forge];
   const label = forgeLabel(state.main);
 
+  state.partial = new Set();
   let repo, releases, extras, prCounts, repoErr = null;
   try {
     [repo, releases, extras, prCounts] = await Promise.all([
@@ -2134,6 +2189,7 @@ async function renderRepoDetail(repoName) {
   }
 
   applyPrCounts([repo], prCounts);
+  if (releases.incomplete) notePartial(repoName);
   const { contributors, languages, commitActivity, participation } = extras;
 
   // Mirror downloads per release tag
@@ -2163,6 +2219,8 @@ async function renderRepoDetail(repoName) {
   `;
 
   let html = `<div style="margin-bottom:14px"><a class="btn btn-mini" href="${esc(dashHref())}">← All repositories</a></div>`;
+
+  html += partialWarningHtml();
 
   if (repoErr) {
     html += `<p style="color:var(--yellow);font-size:12px;margin-bottom:12px">⚠️ Live repository info unavailable (${esc(repoErr.message)}) — showing data already loaded by the dashboard.</p>`;
@@ -2291,17 +2349,19 @@ async function renderRepoDetail(repoName) {
       </div>
       ${!engine.counts && !anyMirror ? `<p style="color:var(--text2);font-size:13px;margin-bottom:10px">${esc(label)} does not expose download counts for release assets.</p>` : ''}
       <div class="releases-list">
-        ${releases.map(r => {
+        ${releases.map((r, i) => {
+          // Past the first page, rows start hidden and "Show more" reveals them
+          const more = i >= REL_LIST_PAGE ? ' hidden data-more' : '';
           const row = `
             <span class="tag-name">${esc(r.tag)}</span>
             <span class="name">${esc(r.name || r.tag)}${r.prerelease ? ' <span class="badge-pre">⚠️ pre-release</span>' : ''}</span>
             <span class="date">${formatDate(r.date)}</span>
             ${showDl ? `<span class="downloads">⬇️ ${formatNumber(combinedDl(r))}${partsOf(r).length ? ` <small style="color:var(--text2);font-weight:400">(${esc(partsTitle(releaseMainDl(r), partsOf(r)))})</small>` : ''}</span>` : ''}`;
-          if (!r.assets.length) return `<div class="release-item">${row}</div>`;
+          if (!r.assets.length) return `<div class="release-item"${more}>${row}</div>`;
           const countedCount = countableAssets(r).length;
           const skippedCount = r.assets.length - countedCount;
           return `
-          <details class="release-wrap">
+          <details class="release-wrap"${more}>
             <summary><div class="release-item">${row}<span style="color:var(--text2);font-size:11px">📎 ${countedCount} assets${skippedCount ? ` +${skippedCount} not counted` : ''} ▾</span></div></summary>
             <div class="release-assets">
               ${r.assets.map(a => {
@@ -2325,11 +2385,17 @@ async function renderRepoDetail(repoName) {
           </details>`;
         }).join('')}
       </div>
+      ${releases.length > REL_LIST_PAGE ? `
+      <div style="display:flex;gap:8px;margin-top:10px" id="relMore">
+        <button class="btn btn-mini" id="relMoreBtn"></button>
+        <button class="btn btn-mini" id="relAllBtn">Show all (${releases.length})</button>
+      </div>` : ''}
     </div>`;
   }
 
   app.innerHTML = html;
   wireRepoMirrors(repoName);
+  wireReleaseMore();
 
   wireExport('exportRelCsvBtn', 'exportRelJsonBtn', `forgestats-${state.main.user}-${repoName}-releases`, () =>
     releases.map(r => ({
