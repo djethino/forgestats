@@ -5,9 +5,9 @@
 🔗 **Live: [djethino.github.io/forgestats](https://djethino.github.io/forgestats/)** · 👀 **[Live example](https://djethino.github.io/forgestats/#main=github:djethino&mirrors=sourceforge:asymptomatik&links=unitygametranslator-manager%3Esourceforge:unitygametranslator/manager)** — a GitHub account with its SourceForge mirror, including a project linked by hand to a SourceForge sub-folder
 
 > [!WARNING]
-> **Official sources: only [djethino/forgestats](https://github.com/djethino/forgestats) and [djethino.github.io/forgestats](https://djethino.github.io/forgestats/).** ForgeStats is a web page — there is nothing to install, and it is **never distributed as a `.zip`, `.exe` or any other download**. Copies of this repository have been re-published with a "download and extract" README hiding malware: if you were asked to download ForgeStats, don't run it, and report the repository to GitHub.
+> **Official sources: only [djethino/forgestats](https://github.com/djethino/forgestats) and [djethino.github.io/forgestats](https://djethino.github.io/forgestats/).** ForgeStats is a web page — there is nothing to install, and it is **never distributed as a `.zip`, `.exe` or any other download** (to self-host it, take `index.html` from this repository only). Copies of this repository have been re-published with a "download and extract" README hiding malware: if you were asked to download ForgeStats, don't run it, and report the repository to GitHub.
 
-Enter a profile link, get a full dashboard: stars, forks, releases, download counts, languages, activity. If your releases are mirrored on another forge, ForgeStats detects the matching projects automatically and **adds their download counts to your totals** — per release.
+Enter a profile link, get a full dashboard: the latest release of every repo at a glance, stars, forks, download counts, languages, activity, and repo cards sorted by last push. If your releases are mirrored on another forge, ForgeStats detects the matching projects automatically and **adds their download counts to your totals** — per release.
 
 ![Dashboard — all repos with aggregated downloads](screenshots/allrepo.png)
 
@@ -89,7 +89,7 @@ No account, no install — open the [live page](https://djethino.github.io/forge
 
 ## Self-hosting
 
-It's one file. Download `index.html`, put it anywhere (GitHub Pages, any static host, or open it locally). No build step, no dependencies besides Chart.js from a CDN.
+It's one file. Take `index.html` from this repository (the official one — see the warning at the top) and put it anywhere: GitHub Pages, any static host, or open it locally. No build step, no dependencies besides Chart.js from a CDN.
 
 ## License
 
