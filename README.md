@@ -2,7 +2,7 @@
 
 **Repository, release and download stats for any account on a software forge — with mirror download counts aggregated across platforms.**
 
-🔗 **Live: [djethino.github.io/forgestats](https://djethino.github.io/forgestats/)**
+🔗 **Live: [djethino.github.io/forgestats](https://djethino.github.io/forgestats/)** · 👀 **[Live example](https://djethino.github.io/forgestats/#main=github:djethino&mirrors=sourceforge:asymptomatik&links=unitygametranslator-manager%3Esourceforge:unitygametranslator/manager)** — a GitHub account with its SourceForge mirror, including a project linked by hand to a SourceForge sub-folder
 
 > [!WARNING]
 > **Official sources: only [djethino/forgestats](https://github.com/djethino/forgestats) and [djethino.github.io/forgestats](https://djethino.github.io/forgestats/).** ForgeStats is a web page — there is nothing to install, and it is **never distributed as a `.zip`, `.exe` or any other download**. Copies of this repository have been re-published with a "download and extract" README hiding malware: if you were asked to download ForgeStats, don't run it, and report the repository to GitHub.
