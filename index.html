@@ -646,7 +646,7 @@ header h1 svg { fill: var(--text); }
 
 <header>
   <div class="container">
-    <h1 onclick="navigateHome()" style="cursor:pointer" title="Home">
+    <h1 onclick="navigateLogo()" style="cursor:pointer" title="Dashboard">
       <svg height="24" width="24" viewBox="0 0 24 24"><path d="M12 2 3 7v6c0 5 3.8 8.4 9 9 5.2-.6 9-4 9-9V7l-9-5zm0 2.2 7 3.9v4.9c0 4-3 6.7-7 7.3-4-.6-7-3.3-7-7.3V8.1l7-3.9z"/><path d="M8 11h8v2H8zm2 3h4v2h-4zm-1-6h6v2H9z"/></svg>
       ForgeStats
     </h1>
@@ -698,7 +698,7 @@ function forgeColor(p) { return ENGINES[p.forge].color; }
 const state = {
   main: null,
   mirrors: [],       // [{forge, host?, user, names, map: {repoName -> target|null}, _rels: {}}]
-  links: [],         // manual repo -> mirror associations: [{repo, raw, none?} | {repo, raw, m, target, tpl?}]
+  links: [],         // manual repo -> mirror associations, stored per main profile: [{repo, raw, none?} | {repo, raw, m, target, tpl?}]
   linkMirrors: {},   // mirror objects created by links, by refString (keeps their release cache)
   key: '',
   repoCache: {},     // repo objects from the dashboard, fallback if getRepo fails on the detail page
@@ -1328,7 +1328,7 @@ function exportBackup() {
       if (k && k.startsWith(HIST_PREFIX)) history[k.slice(HIST_PREFIX.length)] = JSON.parse(localStorage.getItem(k) || '[]');
     }
   } catch {}
-  let config = state.main ? baseHash() : '';
+  let config = state.main ? configHash() : '';
   if (!config) { try { config = localStorage.getItem('fgs_last') || ''; } catch {} }
   const data = { app: 'forgestats', version: 1, exported: new Date().toISOString(), config, history, prefs: { vis: getVisFilter() } };
   const who = state.main ? `-${state.main.user}` : '';
@@ -1524,11 +1524,11 @@ function wireConfigPanel() {
   // come from another configuration, so opening it is offered instead
   wireBackupImport('importBackupBtn', 'importBackupFile', 'cfgMsg', (config, m) => {
     const actions = document.createElement('span');
-    actions.innerHTML = config !== baseHash()
+    actions.innerHTML = config !== configHash()
       ? ' <button class="btn btn-mini">Open the imported configuration</button>'
       : ' <button class="btn btn-mini">↻ Refresh the charts</button>';
     actions.querySelector('button').addEventListener('click', () => {
-      if (config !== baseHash()) window.location.hash = config; else handleRoute();
+      if (config !== configHash()) window.location.hash = config; else handleRoute();
     });
     m.appendChild(actions);
   });
@@ -1812,7 +1812,7 @@ async function renderDashboard() {
   function renderRepoCards(list) {
     const grid = document.getElementById('repoGrid');
     grid.innerHTML = list.map(r => `
-      <div class="repo-card" onclick="navigateToRepo('${esc(r.name)}')">
+      <div class="repo-card" onclick="openRepo(event, '${esc(r.name)}')" onauxclick="openRepo(event, '${esc(r.name)}')">
         <div class="repo-name">${esc(r.name)}${r.private ? ' <span class="badge-private">🔒 private</span>' : ''}${r.archived ? ' <span class="badge-archived">📦 archived</span>' : ''}${r.template ? ' <span class="badge-template">📐 template</span>' : ''}</div>
         <div class="repo-desc">${r.description ? esc(r.description) : '<em>No description</em>'}</div>
         <div class="repo-meta">
@@ -2027,12 +2027,12 @@ async function renderRepoDetail(repoName) {
 
   document.getElementById('breadcrumb').innerHTML = `
     ${state.main.forge === 'github' ? `<img class="header-avatar" src="https://github.com/${esc(state.main.user)}.png?size=64" alt="">` : ''}
-    <a onclick="navigateDash()">${esc(state.main.user)}</a>
+    <a href="${esc(dashHref())}">${esc(state.main.user)}</a>
     <span>/</span>
     <strong>${esc(repoName)}</strong>
   `;
 
-  let html = '';
+  let html = `<div style="margin-bottom:14px"><a class="btn btn-mini" href="${esc(dashHref())}">← All repositories</a></div>`;
 
   if (repoErr) {
     html += `<p style="color:var(--yellow);font-size:12px;margin-bottom:12px">⚠️ Live repository info unavailable (${esc(repoErr.message)}) — showing data already loaded by the dashboard.</p>`;
@@ -2529,18 +2529,13 @@ function profileInput(p) {
   }
 }
 
-// Manual links of the configuration being edited on the home page: kept as long as
-// the main profile stays the same (they name its repositories)
-let landingCarry = null;
-
 function renderLanding() {
   document.getElementById('breadcrumb').innerHTML = '';
   const app = document.getElementById('app');
   // Pre-fill with the configuration just left, or the last one opened in this browser
   const prev = state.main
     ? { main: state.main, mirrors: state.mirrors, links: state.links }
-    : (() => { const c = lastConfig(); return c && { ...c, links: parseLinks(c.links) }; })();
-  landingCarry = prev;
+    : (() => { const c = lastConfig(); return c && { ...c, links: loadLinks(c.main) }; })();
   const hasToken = !!getToken();
   app.innerHTML = `
   <div class="landing">
@@ -2551,7 +2546,7 @@ function renderLanding() {
       <input type="text" id="mainInput" placeholder="https://github.com/username — profile or repo link (gitlab.com, codeberg.org too)" value="${prev ? esc(profileInput(prev.main)) : ''}">
       <label>Mirror profiles <span class="opt">optional — comma separated, adds their download counts</span></label>
       <input type="text" id="mirrorsInput" placeholder="https://sourceforge.net/u/username/profile, https://codeberg.org/username" value="${prev ? esc(prev.mirrors.map(profileInput).join(', ')) : ''}">
-      ${prev && prev.links.length ? `<p class="landing-note" id="linksNote">🔗 ${prev.links.length} manual link${prev.links.length > 1 ? 's' : ''} kept with this configuration (dropped if you change the main profile).</p>` : ''}
+      ${prev && prev.links.length ? `<p class="landing-note" id="linksNote">🔗 ${prev.links.length} manual link${prev.links.length > 1 ? 's' : ''} remembered for this profile in this browser.</p>` : ''}
       <label>GitHub token <span class="opt">optional — only used for github.com calls</span></label>
       <input type="password" id="tokenInput" placeholder="${hasToken ? '🔑 A token is saved in this browser — leave empty to keep it' : 'ghp_... or github_pat_...'}" autocomplete="off">
       <div class="landing-tools" id="tokenTools"${hasToken ? '' : ' hidden'}>
@@ -2618,9 +2613,8 @@ function submitLanding() {
   // An empty field keeps the saved token (removal has its own button)
   const token = document.getElementById('tokenInput').value.trim();
   if (token) { try { localStorage.setItem('fgs_token', token); } catch {} }
-  const links = landingCarry && refString(landingCarry.main).toLowerCase() === refString(main).toLowerCase()
-    ? landingCarry.links : [];
-  window.location.hash = buildHash(main, mirrors, links, main.repo);
+  // Manual links follow on their own: they are stored per main profile
+  window.location.hash = buildHash(main, mirrors, [], main.repo);
 }
 
 // ---- NAVIGATION (shareable hash: #main=forge:user&mirrors=forge:user,...&repo=name) ----
@@ -2735,24 +2729,54 @@ function buildHash(main, mirrors, links, repo) {
   return h;
 }
 
-function baseHash() { return buildHash(state.main, state.mirrors, state.links); }
+// Manual links are kept in this browser, per main profile, rather than in the
+// address bar: a tab opened before a link was added picks it up on refresh instead
+// of silently dropping it. Only a configuration link (copied, or from a backup)
+// carries them; opening one stores them here.
+function linksStoreKey(main) { return 'fgs_links:' + refString(main).toLowerCase(); }
+
+function loadLinks(main) {
+  try { return parseLinks(localStorage.getItem(linksStoreKey(main)) || ''); } catch { return []; }
+}
+
+function storeLinks(main, links) {
+  try { localStorage.setItem(linksStoreKey(main), links.map(l => `${l.repo}>${l.raw}`).join(',')); } catch {}
+}
+
+// Navigation hash (no links) and configuration hash (with links, to share or back up)
+function baseHash() { return buildHash(state.main, state.mirrors, []); }
+function configHash() { return buildHash(state.main, state.mirrors, state.links); }
 
 function currentRepoParam() {
   return new URLSearchParams(window.location.hash.slice(1)).get('repo');
 }
 
-// Rewrites the configuration part of the URL, staying on the current page
-function setConfig({ mirrors = state.mirrors, links = state.links } = {}) {
-  window.location.hash = buildHash(state.main, mirrors, links, currentRepoParam());
+// Applies a configuration change, staying on the current page
+function setConfig({ mirrors = state.mirrors, links } = {}) {
+  if (links) storeLinks(state.main, links);
+  const before = window.location.hash;
+  window.location.hash = buildHash(state.main, mirrors, [], currentRepoParam());
+  // Links alone leave the URL unchanged, so no hashchange fires: re-render by hand
+  if (window.location.hash === before) handleRoute();
 }
 
 function configUrl() {
-  return `${location.origin}${location.pathname}#${baseHash()}`;
+  return `${location.origin}${location.pathname}#${configHash()}`;
 }
+
+function dashHref() { return '#' + baseHash(); }
+function repoHref(name) { return '#' + buildHash(state.main, state.mirrors, [], name); }
 
 function navigateHome() { window.location.hash = ''; }
 function navigateDash() { window.location.hash = baseHash(); }
-function navigateToRepo(name) { window.location.hash = buildHash(state.main, state.mirrors, state.links, name); }
+// Repo cards: Ctrl/Cmd+click or middle click open the repo in a new tab
+function openRepo(e, name) {
+  if (e.button === 1 || e.ctrlKey || e.metaKey) { e.preventDefault(); window.open(repoHref(name), '_blank'); }
+  else if (e.button === 0) navigateToRepo(name);
+}
+function navigateToRepo(name) { window.location.hash = repoHref(name).slice(1); }
+// Header logo: back to the dashboard once a configuration is open
+function navigateLogo() { if (state.main) navigateDash(); else navigateHome(); }
 
 // The last configuration opened, so the home page can be pre-filled (this browser only)
 function rememberConfig() {
@@ -2764,11 +2788,7 @@ function lastConfig() {
     const p = new URLSearchParams(localStorage.getItem('fgs_last') || '');
     const main = parseRef(p.get('main'));
     if (!main) return null;
-    return {
-      main,
-      mirrors: (p.get('mirrors') || '').split(',').map(parseRef).filter(Boolean),
-      links: p.get('links') || ''
-    };
+    return { main, mirrors: (p.get('mirrors') || '').split(',').map(parseRef).filter(Boolean) };
   } catch { return null; }
 }
 
@@ -2788,7 +2808,13 @@ function handleRoute() {
     state.mirrors = mirrors;
     state.key = key;
   }
-  state.links = parseLinks(p.get('links'));
+  // A configuration link brings its manual links into this browser, then the
+  // address bar goes back to the plain navigation form
+  if (p.get('links') !== null) {
+    storeLinks(main, parseLinks(p.get('links')));
+    history.replaceState(null, '', '#' + buildHash(main, mirrors, [], p.get('repo')));
+  }
+  state.links = loadLinks(main);
   rememberConfig();
 
   const repo = p.get('repo');
