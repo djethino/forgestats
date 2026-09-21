@@ -792,6 +792,7 @@ function setRepoSort(v) {
 // Transient failures are retried, and authenticated GitHub calls that keep failing with 5xx
 // are retried once anonymously: public data still loads when GitHub rejects the token.
 const memCache = new Map();
+const BIG_RESPONSE = 1000000;   // characters: above this, a response is not cached raw
 
 // Discreet warning banner when GitHub keeps failing (incident, or blocking extension)
 function noteDegraded() {
@@ -853,9 +854,15 @@ async function apiFetch(url, isGitHub = false) {
       }
       throw new Error(`API ${resp.status}: ${resp.statusText} (${u.hostname}${u.pathname})`);
     }
-    const data = await resp.json();
-    memCache.set(url, data);
-    if (useCache) cacheSet(url, data);
+    const text = await resp.text();
+    const data = JSON.parse(text);
+    // A page of a big repo's releases weighs megabytes (every asset carries its uploader's
+    // whole profile): kept raw it fills memory, and localStorage refuses it after the cost
+    // of serializing it. The adapters keep the normalized, much smaller result instead.
+    if (text.length < BIG_RESPONSE) {
+      memCache.set(url, data);
+      if (useCache) cacheSet(url, data);
+    }
     return data;
   }
   // Anonymous fallback for authenticated GitHub calls stuck on 5xx (works for public data)
@@ -919,19 +926,54 @@ function prWord() { return state.main && state.main.forge === 'gitlab' ? 'MRs' :
 // Every page of a paged list, normalized. `fetchPage(page)` returns one page; the list ends
 // on a page shorter than `size`. A page that fails ends it early and marks the result
 // `incomplete`, so what is built on it can say it is partial instead of undercounting.
-async function fetchAllPages(fetchPage, size, norm = x => x) {
+// After the first page, the next ones are asked PAGE_CONCURRENCY at a time: a big repo's
+// release list is dozens of pages, and one after the other they take minutes. Pages past
+// the end come back empty, so at most PAGE_CONCURRENCY - 1 requests are spent for nothing,
+// and only on lists longer than one page. Each page is normalized as it arrives, so the
+// raw data can be freed. `progress` counts items into the loading message.
+const PAGE_CONCURRENCY = 4;
+
+async function fetchAllPages(fetchPage, size, norm = x => x, progress = false) {
   const all = [];
-  let incomplete = false;
-  for (let page = 1; ; page++) {
-    let batch;
-    try { batch = await fetchPage(page); } catch { incomplete = true; break; }
-    if (!Array.isArray(batch)) { incomplete = true; break; }
-    all.push(...batch);
-    if (batch.length < size) break;
+  let incomplete = false, page = 1, done = false;
+  while (!done) {
+    const n = page === 1 ? 1 : PAGE_CONCURRENCY;
+    const batches = await Promise.all(Array.from({ length: n }, (_, i) =>
+      Promise.resolve().then(() => fetchPage(page + i)).then(b => Array.isArray(b) ? b : null, () => null)));
+    for (const batch of batches) {
+      // In page order: a short page ends the list, whatever happened to the ones after it
+      if (batch === null) { incomplete = true; done = true; break; }
+      for (const item of batch) all.push(norm(item));
+      if (progress) noteLoadProgress(batch.length);
+      if (batch.length < size) { done = true; break; }
+    }
+    page += n;
   }
-  const out = all.map(norm);
-  out.incomplete = incomplete;
-  return out;
+  all.incomplete = incomplete;
+  return all;
+}
+
+// Release lists, normalized, kept for the session: a big repo's list costs dozens of
+// requests, and the raw pages are not cached (see BIG_RESPONSE). A partial list is not
+// kept, so the next render tries again.
+const releaseMemo = new Map();
+
+function memoReleases(key, load) {
+  if (!releaseMemo.has(key)) {
+    const pending = load().then(rels => {
+      if (rels.incomplete) releaseMemo.delete(key);
+      return rels;
+    }, e => { releaseMemo.delete(key); throw e; });
+    releaseMemo.set(key, pending);
+  }
+  return releaseMemo.get(key);
+}
+
+// "Loading releases… N loaded" while a render waits on long release lists
+function noteLoadProgress(n) {
+  state.relLoaded = (state.relLoaded || 0) + n;
+  const el = document.querySelector('#app .loading span');
+  if (el && state.relLoaded >= 200) el.textContent = `Loading releases… ${state.relLoaded} loaded`;
 }
 
 // Release lists that could not be loaded in full during the current render: shown as a
@@ -1013,9 +1055,9 @@ const adapters = {
       };
     },
     async listReleases(p, name) {
-      return fetchAllPages(
+      return memoReleases(`github:${p.user}/${name}`, () => fetchAllPages(
         page => apiFetch(`https://api.github.com/repos/${p.user}/${name}/releases?per_page=100&page=${page}`, true),
-        100, r => this.normRelease(r));
+        100, r => this.normRelease(r), true));
     },
     async latestRelease(p, name) {
       try {
@@ -1105,9 +1147,9 @@ const adapters = {
       };
     },
     async listReleases(p, name) {
-      return fetchAllPages(
+      return memoReleases(`gitlab:${p.host}:${p.user}/${name}`, () => fetchAllPages(
         page => apiFetch(`${this.api(p)}/projects/${this.projectPath(p, name)}/releases?per_page=100&page=${page}`),
-        100, r => this.normRelease(r));
+        100, r => this.normRelease(r), true));
     },
     async latestRelease(p, name) {
       const rels = await this.listReleases(p, name);
@@ -1172,10 +1214,12 @@ const adapters = {
       };
     },
     async listReleases(p, name) {
-      const size = await this.pageSize(p);
-      return fetchAllPages(
-        page => apiFetch(`${this.api(p)}/repos/${p.user}/${name}/releases?limit=${size}&page=${page}`),
-        size, r => this.normRelease(r));
+      return memoReleases(`gitea:${p.host}:${p.user}/${name}`, async () => {
+        const size = await this.pageSize(p);
+        return fetchAllPages(
+          page => apiFetch(`${this.api(p)}/repos/${p.user}/${name}/releases?limit=${size}&page=${page}`),
+          size, r => this.normRelease(r), true);
+      });
     },
     async latestRelease(p, name) {
       try {
@@ -1763,6 +1807,7 @@ async function renderDashboard() {
   // (one request per repo) and gives all-time download totals, not just the latest release's
   const mainAdapter = adapters[state.main.forge];
   state.partial = new Set();
+  state.relLoaded = 0;
   const [allReleases, prCounts] = await Promise.all([
     Promise.all(repos.map(r => mainAdapter.listReleases(state.main, r.name))),
     mainAdapter.openPrCounts ? mainAdapter.openPrCounts(state.main, repos.map(r => r.name)) : null,
@@ -2135,28 +2180,39 @@ async function renderDashboard() {
 
 // ---- DETAIL PAGE ----
 
+// Asset chart: kinds of files drawn as their own line (the rest is summed into "Other"),
+// and the release count past which points are no longer drawn
+const ASSET_LINES_MAX = 12;
+const ASSET_CHART_DENSE = 60;
+
 // "All releases" shows this many rows, then more on demand (charts and totals always use all)
 const REL_LIST_PAGE = 20;
 
-function wireReleaseMore() {
+function wireReleaseMore(releases, rowHtml, assetsHtml) {
+  const list = document.querySelector('.releases-list');
+  if (!list) return;
+  // A release's asset lines are built the first time it is opened
+  list.addEventListener('toggle', e => {
+    const d = e.target;
+    if (!d.matches || !d.matches('details.release-wrap') || !d.open || d.dataset.filled) return;
+    d.querySelector('.release-assets').innerHTML = assetsHtml(releases[+d.dataset.rel]);
+    d.dataset.filled = '1';
+  }, true);   // toggle does not bubble: listened to on the way down
+
   const box = document.getElementById('relMore');
   if (!box) return;
-  const hidden = () => document.querySelectorAll('.releases-list > [data-more][hidden]');
+  let shown = Math.min(REL_LIST_PAGE, releases.length);
   const more = document.getElementById('relMoreBtn');
-  const refresh = () => {
-    const left = hidden().length;
+  const showUpTo = end => {
+    list.insertAdjacentHTML('beforeend', releases.slice(shown, end).map((r, j) => rowHtml(r, shown + j)).join(''));
+    shown = Math.min(end, releases.length);
+    const left = releases.length - shown;
     if (!left) { box.hidden = true; return; }
     more.textContent = `Show ${Math.min(REL_LIST_PAGE, left)} more`;
   };
-  more.addEventListener('click', () => {
-    [...hidden()].slice(0, REL_LIST_PAGE).forEach(el => { el.hidden = false; });
-    refresh();
-  });
-  document.getElementById('relAllBtn').addEventListener('click', () => {
-    hidden().forEach(el => { el.hidden = false; });
-    refresh();
-  });
-  refresh();
+  more.addEventListener('click', () => showUpTo(shown + REL_LIST_PAGE));
+  document.getElementById('relAllBtn').addEventListener('click', () => showUpTo(releases.length));
+  showUpTo(shown);
 }
 
 async function renderRepoDetail(repoName) {
@@ -2168,6 +2224,7 @@ async function renderRepoDetail(repoName) {
   const label = forgeLabel(state.main);
 
   state.partial = new Set();
+  state.relLoaded = 0;
   let repo, releases, extras, prCounts, repoErr = null;
   try {
     [repo, releases, extras, prCounts] = await Promise.all([
@@ -2337,6 +2394,43 @@ async function renderRepoDetail(repoName) {
     </div>`;
   }
 
+  // One release row. A big repo has thousands of releases and tens of thousands of asset
+  // lines: only the first rows are built up front, the next ones when "Show more" asks,
+  // and a row's asset lines when it is first opened (see wireReleaseMore)
+  const releaseRowHtml = (r, i) => {
+    const row = `
+      <span class="tag-name">${esc(r.tag)}</span>
+      <span class="name">${esc(r.name || r.tag)}${r.prerelease ? ' <span class="badge-pre">⚠️ pre-release</span>' : ''}</span>
+      <span class="date">${formatDate(r.date)}</span>
+      ${showDl ? `<span class="downloads">⬇️ ${formatNumber(combinedDl(r))}${partsOf(r).length ? ` <small style="color:var(--text2);font-weight:400">(${esc(partsTitle(releaseMainDl(r), partsOf(r)))})</small>` : ''}</span>` : ''}`;
+    if (!r.assets.length) return `<div class="release-item">${row}</div>`;
+    const countedCount = countableAssets(r).length;
+    const skippedCount = r.assets.length - countedCount;
+    return `
+    <details class="release-wrap" data-rel="${i}">
+      <summary><div class="release-item">${row}<span style="color:var(--text2);font-size:11px">📎 ${countedCount} assets${skippedCount ? ` +${skippedCount} not counted` : ''} ▾</span></div></summary>
+      <div class="release-assets"></div>
+    </details>`;
+  };
+
+  const assetRowsHtml = r => r.assets.map(a => {
+    // Checksums are listed for reference but excluded from every total,
+    // on the main forge and on the mirrors alike
+    const skipped = isHashAsset(a.name);
+    const aParts = skipped ? [] : assetParts(partsOf(r), a.name);
+    const aMain = a.downloads === null ? null : a.downloads;
+    const aTotal = (aMain || 0) + partsTotal(aParts);
+    const dl = aMain === null && !aParts.length
+      ? 'n/a'
+      : `${formatNumber(skipped ? (aMain || 0) : aTotal)}${aParts.length ? ` <small style="color:var(--text2);font-weight:400">(${esc(partsTitle(aMain, aParts))})</small>` : ''}`;
+    return `
+    <div class="release-item${skipped ? ' asset-skipped' : ''}">
+      <span class="name" style="font-size:13px">${esc(a.name)}${skipped ? ' <span class="badge-skip">not counted</span>' : ''}</span>
+      ${a.size !== null ? `<span class="date">${(a.size / 1048576).toFixed(1)} MB</span>` : ''}
+      <span class="downloads">⬇️ ${dl}</span>
+    </div>`;
+  }).join('');
+
   // All releases
   if (releases.length > 0) {
     html += `
@@ -2349,41 +2443,7 @@ async function renderRepoDetail(repoName) {
       </div>
       ${!engine.counts && !anyMirror ? `<p style="color:var(--text2);font-size:13px;margin-bottom:10px">${esc(label)} does not expose download counts for release assets.</p>` : ''}
       <div class="releases-list">
-        ${releases.map((r, i) => {
-          // Past the first page, rows start hidden and "Show more" reveals them
-          const more = i >= REL_LIST_PAGE ? ' hidden data-more' : '';
-          const row = `
-            <span class="tag-name">${esc(r.tag)}</span>
-            <span class="name">${esc(r.name || r.tag)}${r.prerelease ? ' <span class="badge-pre">⚠️ pre-release</span>' : ''}</span>
-            <span class="date">${formatDate(r.date)}</span>
-            ${showDl ? `<span class="downloads">⬇️ ${formatNumber(combinedDl(r))}${partsOf(r).length ? ` <small style="color:var(--text2);font-weight:400">(${esc(partsTitle(releaseMainDl(r), partsOf(r)))})</small>` : ''}</span>` : ''}`;
-          if (!r.assets.length) return `<div class="release-item"${more}>${row}</div>`;
-          const countedCount = countableAssets(r).length;
-          const skippedCount = r.assets.length - countedCount;
-          return `
-          <details class="release-wrap"${more}>
-            <summary><div class="release-item">${row}<span style="color:var(--text2);font-size:11px">📎 ${countedCount} assets${skippedCount ? ` +${skippedCount} not counted` : ''} ▾</span></div></summary>
-            <div class="release-assets">
-              ${r.assets.map(a => {
-                // Checksums are listed for reference but excluded from every total,
-                // on the main forge and on the mirrors alike
-                const skipped = isHashAsset(a.name);
-                const aParts = skipped ? [] : assetParts(partsOf(r), a.name);
-                const aMain = a.downloads === null ? null : a.downloads;
-                const aTotal = (aMain || 0) + partsTotal(aParts);
-                const dl = aMain === null && !aParts.length
-                  ? 'n/a'
-                  : `${formatNumber(skipped ? (aMain || 0) : aTotal)}${aParts.length ? ` <small style="color:var(--text2);font-weight:400">(${esc(partsTitle(aMain, aParts))})</small>` : ''}`;
-                return `
-                <div class="release-item${skipped ? ' asset-skipped' : ''}">
-                  <span class="name" style="font-size:13px">${esc(a.name)}${skipped ? ' <span class="badge-skip">not counted</span>' : ''}</span>
-                  ${a.size !== null ? `<span class="date">${(a.size / 1048576).toFixed(1)} MB</span>` : ''}
-                  <span class="downloads">⬇️ ${dl}</span>
-                </div>`;
-              }).join('')}
-            </div>
-          </details>`;
-        }).join('')}
+        ${releases.slice(0, REL_LIST_PAGE).map(releaseRowHtml).join('')}
       </div>
       ${releases.length > REL_LIST_PAGE ? `
       <div style="display:flex;gap:8px;margin-top:10px" id="relMore">
@@ -2395,7 +2455,7 @@ async function renderRepoDetail(repoName) {
 
   app.innerHTML = html;
   wireRepoMirrors(repoName);
-  wireReleaseMore();
+  wireReleaseMore(releases, releaseRowHtml, assetRowsHtml);
 
   wireExport('exportRelCsvBtn', 'exportRelJsonBtn', `forgestats-${state.main.user}-${repoName}-releases`, () =>
     releases.map(r => ({
@@ -2535,30 +2595,58 @@ async function renderRepoDetail(repoName) {
 
     const datasets = [];
 
-    if (engine.counts) {
-      const normalizedSet = new Set();
-      sortedReleases.forEach(r => countableAssets(r).forEach(a => normalizedSet.add(normalizeAssetName(a.name))));
-      const assetGroups = [...normalizedSet].filter(n => n.length > 0);
+    // A big repo has hundreds of releases and over a hundred kinds of files: names are
+    // grouped once, in a single pass, and only the most downloaded kinds get their own
+    // line — the rest is summed into "Other", so the chart stays readable and fast
+    const many = sortedReleases.length > ASSET_CHART_DENSE;
+    const pointStyle = many ? { pointRadius: 0, pointHoverRadius: 3 } : { pointRadius: 4, pointHoverRadius: 6 };
 
-      assetGroups.forEach((group, i) => {
+    if (engine.counts) {
+      const groupTotals = new Map();
+      const perRelease = sortedReleases.map(r => {
+        const byGroup = new Map();
+        countableAssets(r).forEach(a => {
+          const g = normalizeAssetName(a.name);
+          if (!g) return;
+          const d = a.downloads || 0;
+          byGroup.set(g, (byGroup.get(g) || 0) + d);
+          groupTotals.set(g, (groupTotals.get(g) || 0) + d);
+        });
+        return byGroup;
+      });
+      const ranked = [...groupTotals.entries()].sort((x, y) => y[1] - x[1]).map(e => e[0]);
+      const top = ranked.slice(0, ASSET_LINES_MAX);
+      const topSet = new Set(top);
+
+      top.forEach((group, i) => {
         const color = lineColors[i % lineColors.length];
         datasets.push({
           label: group,
-          data: sortedReleases.map(r => {
-            return countableAssets(r)
-              .filter(a => normalizeAssetName(a.name) === group)
-              .reduce((sum, a) => sum + (a.downloads || 0), 0);
-          }),
+          data: perRelease.map(m => m.get(group) || 0),
           borderColor: color,
           backgroundColor: color + '22',
           pointBackgroundColor: color,
-          pointRadius: 4,
-          pointHoverRadius: 6,
+          ...pointStyle,
           borderWidth: 2,
           tension: 0.2,
           fill: false,
         });
       });
+
+      const others = ranked.length - top.length;
+      if (others > 0) {
+        datasets.push({
+          label: `Other (${others} kinds of files)`,
+          data: perRelease.map(m => { let sum = 0; m.forEach((v, g) => { if (!topSet.has(g)) sum += v; }); return sum; }),
+          borderColor: '#8b949e',
+          backgroundColor: '#8b949e22',
+          pointBackgroundColor: '#8b949e',
+          ...pointStyle,
+          borderWidth: 1.5,
+          tension: 0.2,
+          fill: false,
+        });
+      }
     }
 
     // One line per mirror source (per-release totals)
@@ -2572,8 +2660,7 @@ async function renderRepoDetail(repoName) {
         borderColor: color,
         backgroundColor: color + '22',
         pointBackgroundColor: color,
-        pointRadius: 4,
-        pointHoverRadius: 6,
+        ...pointStyle,
         borderWidth: 2,
         tension: 0.2,
         fill: false,
@@ -2587,8 +2674,7 @@ async function renderRepoDetail(repoName) {
       borderColor: '#e6edf3',
       backgroundColor: '#e6edf322',
       pointBackgroundColor: '#e6edf3',
-      pointRadius: 5,
-      pointHoverRadius: 7,
+      ...(many ? pointStyle : { pointRadius: 5, pointHoverRadius: 7 }),
       borderWidth: 2.5,
       borderDash: [6, 3],
       tension: 0.2,
@@ -2599,6 +2685,7 @@ async function renderRepoDetail(repoName) {
       type: 'line',
       data: { labels, datasets },
       options: {
+        animation: many ? false : undefined,
         interaction: { mode: 'index', intersect: false },
         plugins: {
           legend: { position: 'bottom', labels: { boxWidth: 12, padding: 10, font: { size: 11 } } },
