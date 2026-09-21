@@ -239,9 +239,12 @@ header h1 svg { fill: var(--text); }
   display: flex;
   flex-direction: column;
   gap: 10px;
+  color: var(--text);
+  text-decoration: none;
 }
 
 .repo-card:hover {
+  text-decoration: none;
   border-color: var(--accent);
   transform: translateY(-2px);
 }
@@ -1812,7 +1815,7 @@ async function renderDashboard() {
   function renderRepoCards(list) {
     const grid = document.getElementById('repoGrid');
     grid.innerHTML = list.map(r => `
-      <div class="repo-card" onclick="openRepo(event, '${esc(r.name)}')" onauxclick="openRepo(event, '${esc(r.name)}')">
+      <a class="repo-card" href="${esc(repoHref(r.name))}">
         <div class="repo-name">${esc(r.name)}${r.private ? ' <span class="badge-private">🔒 private</span>' : ''}${r.archived ? ' <span class="badge-archived">📦 archived</span>' : ''}${r.template ? ' <span class="badge-template">📐 template</span>' : ''}</div>
         <div class="repo-desc">${r.description ? esc(r.description) : '<em>No description</em>'}</div>
         <div class="repo-meta">
@@ -1829,7 +1832,7 @@ async function renderDashboard() {
           <span style="color:var(--text2);font-size:11px">${timeAgo(r.latestRelease.date)}</span>
           ${showDl ? `<span class="dl" ${r.mirrorParts.length ? `title="${esc(partsTitle(r.mainDl, r.mirrorParts))}"` : ''}>⬇️ ${formatNumber(r.latestReleaseDl)} downloads${r.mirrorParts.length ? ' <small style="color:var(--text2);font-weight:400">(+mirrors)</small>' : ''}</span>` : ''}
         </div>` : ''}
-      </div>
+      </a>
     `).join('');
   }
 
@@ -2769,11 +2772,6 @@ function repoHref(name) { return '#' + buildHash(state.main, state.mirrors, [], 
 
 function navigateHome() { window.location.hash = ''; }
 function navigateDash() { window.location.hash = baseHash(); }
-// Repo cards: Ctrl/Cmd+click or middle click open the repo in a new tab
-function openRepo(e, name) {
-  if (e.button === 1 || e.ctrlKey || e.metaKey) { e.preventDefault(); window.open(repoHref(name), '_blank'); }
-  else if (e.button === 0) navigateToRepo(name);
-}
 function navigateToRepo(name) { window.location.hash = repoHref(name).slice(1); }
 // Header logo: back to the dashboard once a configuration is open
 function navigateLogo() { if (state.main) navigateDash(); else navigateHome(); }
