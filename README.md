@@ -4,6 +4,9 @@
 
 🔗 **Live: [djethino.github.io/forgestats](https://djethino.github.io/forgestats/)**
 
+> [!WARNING]
+> **Official sources: only [djethino/forgestats](https://github.com/djethino/forgestats) and [djethino.github.io/forgestats](https://djethino.github.io/forgestats/).** ForgeStats is a web page — there is nothing to install, and it is **never distributed as a `.zip`, `.exe` or any other download**. Copies of this repository have been re-published with a "download and extract" README hiding malware: if you were asked to download ForgeStats, don't run it, and report the repository to GitHub.
+
 Enter a profile link, get a full dashboard: stars, forks, releases, download counts, languages, activity. If your releases are mirrored on another forge, ForgeStats detects the matching projects automatically and **adds their download counts to your totals** — per release.
 
 ![Dashboard — all repos with aggregated downloads](screenshots/allrepo.png)
