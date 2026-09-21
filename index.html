@@ -775,7 +775,7 @@ function setVisFilter(v) {
 }
 
 // Repo cards order, remembered in this browser (default: most recently pushed first)
-const REPO_SORTS = ['pushed', 'stars', 'forks', 'name', 'downloads', 'issues'];
+const REPO_SORTS = ['pushed', 'stars', 'forks', 'name', 'downloads', 'issues', 'prs'];
 function getRepoSort() {
   try { const v = localStorage.getItem('fgs_sort'); return REPO_SORTS.includes(v) ? v : 'pushed'; } catch { return 'pushed'; }
 }
@@ -833,7 +833,9 @@ async function apiFetch(url, isGitHub = false) {
     if (isGitHub) {
       const remaining = resp.headers.get('X-RateLimit-Remaining');
       const limit = resp.headers.get('X-RateLimit-Limit');
-      if (remaining !== null) {
+      // Only the core quota is shown: search has its own, much smaller one (10 or 30/min)
+      const resource = resp.headers.get('X-RateLimit-Resource');
+      if (remaining !== null && (resource ? resource === 'core' : parseInt(limit, 10) > 30)) {
         document.getElementById('rateLimit').textContent = `GitHub API: ${remaining}/${limit}`;
       }
     }
@@ -872,8 +874,10 @@ async function apiFetch(url, isGitHub = false) {
 }
 
 // ---- NORMALIZED MODEL ----
-// repo:    {name, description, language, stars, forks, issues, watchers, updated, pushed, created,
-//           url, homepage, topics, private, archived, sizeKB, branch, license, fork}
+// repo:    {name, description, language, stars, forks, issues, prs, issuesInclPrs, watchers, updated,
+//           pushed, created, url, homepage, topics, private, archived, sizeKB, branch, license, fork}
+//          prs: open pull/merge requests, null = unknown. issuesInclPrs: `issues` still counts them
+//          (GitHub's open_issues_count does, until applyPrCounts splits them out)
 // release: {tag, name, date, prerelease, assets: [{name, size, downloads}]}  (downloads: null = not tracked)
 
 function isHashAsset(name) {
@@ -890,6 +894,26 @@ function releaseMainDl(release) {
   if (!ENGINES[state.main.forge].counts) return null;
   return countableAssets(release).reduce((sum, a) => sum + (a.downloads || 0), 0);
 }
+
+// Splits open PRs out of the issue counter. `counts` comes from an adapter's openPrCounts:
+// a repo missing from it has none, a null entry is unknown; `counts` itself null means the
+// lookup failed, and every counter is left as the forge gave it.
+function applyPrCounts(repos, counts) {
+  if (!counts) return;
+  const byName = {};
+  Object.keys(counts).forEach(k => { byName[k.toLowerCase()] = counts[k]; });
+  repos.forEach(r => {
+    if (r.prs !== null && r.prs !== undefined) return;   // already known (Gitea, or split before)
+    const key = r.name.toLowerCase();
+    const n = key in byName ? byName[key] : 0;
+    if (n === null) return;
+    r.prs = n;
+    if (r.issuesInclPrs) { r.issues = Math.max(0, r.issues - n); r.issuesInclPrs = false; }
+  });
+}
+
+// "PRs" or "MRs": GitLab calls them merge requests
+function prWord() { return state.main && state.main.forge === 'gitlab' ? 'MRs' : 'PRs'; }
 
 // ---- ADAPTERS (each method takes a profile object p = {forge, host?, user}) ----
 
@@ -916,12 +940,15 @@ const adapters = {
         if (batch.length < 100) break;
         page++;
       }
+      // Decides the search qualifier of openPrCounts (user: or org:)
+      state.githubOwnerType = (repos[0] && repos[0].owner && repos[0].owner.type) || 'User';
       return repos.filter(r => !r.fork).map(this.normRepo);
     },
     normRepo(r) {
       return {
         name: r.name, description: r.description, language: r.language,
-        stars: r.stargazers_count, forks: r.forks_count, issues: r.open_issues_count,
+        stars: r.stargazers_count, forks: r.forks_count,
+        issues: r.open_issues_count, prs: null, issuesInclPrs: true,
         watchers: r.subscribers_count ?? null, updated: r.updated_at, pushed: r.pushed_at || r.updated_at,
         created: r.created_at, url: r.html_url, homepage: r.homepage, topics: r.topics || [],
         private: !!r.private, archived: !!r.archived, template: !!r.is_template,
@@ -931,6 +958,25 @@ const adapters = {
     },
     async getRepo(p, name) {
       return this.normRepo(await apiFetch(`https://api.github.com/repos/${p.user}/${name}`, true));
+    },
+    // Open PRs per repo name. One search query covers the whole account (a single repo on
+    // its page); null when the search fails, and the combined counter is kept as it is.
+    // Private repos are only seen when the token may read their pull requests.
+    async openPrCounts(p, names) {
+      const scope = names.length === 1 ? `repo:${p.user}/${names[0]}`
+        : `${state.githubOwnerType === 'Organization' ? 'org' : 'user'}:${p.user}`;
+      const counts = {};
+      try {
+        for (let page = 1; page <= 10; page++) {
+          const res = await apiFetch(`https://api.github.com/search/issues?q=${encodeURIComponent(`is:pr is:open ${scope}`)}&per_page=100&page=${page}`, true);
+          res.items.forEach(it => {
+            const n = it.repository_url.split('/').pop();
+            counts[n] = (counts[n] || 0) + 1;
+          });
+          if (res.items.length < 100 || page * 100 >= res.total_count) break;
+        }
+        return counts;
+      } catch { return null; }
     },
     normRelease(r) {
       return {
@@ -989,6 +1035,7 @@ const adapters = {
       return {
         name: pr.path, description: pr.description, language: null,
         stars: pr.star_count, forks: pr.forks_count, issues: pr.open_issues_count ?? 0,
+        prs: null, issuesInclPrs: false,
         watchers: null, updated: pr.last_activity_at, pushed: pr.last_activity_at,
         created: pr.created_at, url: pr.web_url, homepage: null, topics: pr.topics || [],
         private: pr.visibility ? pr.visibility !== 'public' : false, archived: !!pr.archived,
@@ -998,9 +1045,30 @@ const adapters = {
       };
     },
     projectPath(p, name) { return encodeURIComponent(`${p.user}/${name}`); },
+    // Open merge requests, one request per project (GitLab has no account-wide count).
+    // The counter stops at 100: beyond that, 100 is shown.
+    async openPrCounts(p, names) {
+      const counts = {};
+      await Promise.all(names.map(async n => {
+        try {
+          const mrs = await apiFetch(`${this.api(p)}/projects/${this.projectPath(p, n)}/merge_requests?state=opened&per_page=100`);
+          counts[n] = Array.isArray(mrs) ? mrs.length : 0;
+        } catch { counts[n] = null; }
+      }));
+      return counts;
+    },
     async getRepo(p, name) {
       const pr = await apiFetch(`${this.api(p)}/projects/${this.projectPath(p, name)}?license=true`);
-      return this.normRepo(pr);
+      const repo = this.normRepo(pr);
+      // A single project fetched anonymously comes without open_issues_count (the project
+      // list has it): the issue statistics endpoint gives the same number
+      if (pr.open_issues_count == null) {
+        try {
+          const st = await apiFetch(`${this.api(p)}/projects/${this.projectPath(p, name)}/issues_statistics`);
+          repo.issues = st.statistics.counts.opened;
+        } catch {}
+      }
+      return repo;
     },
     normRelease(r) {
       return {
@@ -1056,7 +1124,8 @@ const adapters = {
     normRepo(r) {
       return {
         name: r.name, description: r.description, language: r.language || null,
-        stars: r.stars_count, forks: r.forks_count, issues: r.open_issues_count,
+        stars: r.stars_count, forks: r.forks_count,
+        issues: r.open_issues_count, prs: r.open_pr_counter ?? null, issuesInclPrs: false,
         watchers: r.watchers_count ?? null, updated: r.updated_at, pushed: r.updated_at,
         created: r.created_at, url: r.html_url, homepage: r.website || null, topics: [],
         private: !!r.private, archived: !!r.archived, sizeKB: r.size, branch: r.default_branch,
@@ -1664,10 +1733,13 @@ async function renderDashboard() {
 
   // Fetching the full release list costs the same as fetching only the latest
   // (one request per repo) and gives all-time download totals, not just the latest release's
-  const [allReleases] = await Promise.all([
-    Promise.all(repos.map(r => adapters[state.main.forge].listReleases(state.main, r.name))),
+  const mainAdapter = adapters[state.main.forge];
+  const [allReleases, prCounts] = await Promise.all([
+    Promise.all(repos.map(r => mainAdapter.listReleases(state.main, r.name))),
+    mainAdapter.openPrCounts ? mainAdapter.openPrCounts(state.main, repos.map(r => r.name)) : null,
     resolveMirrors(repos.map(r => r.name))
   ]);
+  applyPrCounts(repos, prCounts);
 
   const repoData = await Promise.all(repos.map(async (r, i) => {
     const rels = allReleases[i];
@@ -1721,6 +1793,11 @@ async function renderDashboard() {
   const totalStars = data.reduce((s, r) => s + r.stars, 0);
   const totalForks = data.reduce((s, r) => s + r.forks, 0);
   const totalIssues = data.reduce((s, r) => s + r.issues, 0);
+  // Open PRs, when known for at least one repo; repos where the split failed keep a
+  // combined counter, and the issue card then says so
+  const prsKnown = data.some(r => r.prs !== null && r.prs !== undefined);
+  const totalPrs = data.reduce((s, r) => s + (r.prs || 0), 0);
+  const issuesInclPrs = data.some(r => r.issuesInclPrs);
   const totalDl = data.reduce((s, r) => s + r.totalDl, 0);
   const anyMirror = data.some(r => r.totalParts.length > 0);
   const showDl = ENGINES[state.main.forge].counts || anyMirror;
@@ -1800,7 +1877,8 @@ async function renderDashboard() {
     <div class="stat-card"><div class="value">${data.length}</div><div class="label">Repositories</div></div>
     <div class="stat-card"><div class="value">${formatNumber(totalStars)}</div><div class="label">⭐ Total Stars</div></div>
     <div class="stat-card"><div class="value">${formatNumber(totalForks)}</div><div class="label">🔀 Total Forks</div></div>
-    <div class="stat-card"><div class="value">${totalIssues}</div><div class="label">🔓 Open Issues${state.main.forge === 'github' ? ' + PRs' : ''}</div></div>
+    <div class="stat-card"><div class="value">${totalIssues}</div><div class="label">🔓 Open issues${issuesInclPrs ? ' + PRs' : ''}</div></div>
+    ${prsKnown ? `<div class="stat-card"><div class="value">${totalPrs}</div><div class="label">📬 Open ${prWord()}</div></div>` : ''}
     <div class="stat-card highlight"><div class="value">${reposWithRelease.length}</div><div class="label">📦 Repos with a release</div></div>
     ${showDl ? `<div class="stat-card downloads"><div class="value">${formatNumber(totalDl)}</div><div class="label">⬇️ Downloads (all releases${anyMirror ? ', all sources' : ''})</div></div>` : ''}
     ${languages.length ? `<div class="stat-card"><div class="value">${languages.length}</div><div class="label">🌐 Languages</div></div>` : ''}
@@ -1831,7 +1909,7 @@ async function renderDashboard() {
     <div class="sort-bar">
       <input type="text" id="searchInput" placeholder="Search repositories...">
       <select id="sortSelect">
-        ${[['pushed', '📅 Last push'], ['stars', '⭐ Stars'], ['forks', '🔀 Forks'], ['name', '🔤 Name'], ['downloads', '⬇️ Downloads'], ['issues', '🔓 Issues']]
+        ${[['pushed', '📅 Last push'], ['stars', '⭐ Stars'], ['forks', '🔀 Forks'], ['name', '🔤 Name'], ['downloads', '⬇️ Downloads'], ['issues', '🔓 Issues'], ['prs', `📬 ${prWord()}`]]
           .map(([v, t]) => `<option value="${v}"${v === getRepoSort() ? ' selected' : ''}>${t}</option>`).join('')}
       </select>
     </div>
@@ -1845,7 +1923,8 @@ async function renderDashboard() {
 
   wireExport('exportCsvBtn', 'exportJsonBtn', `forgestats-${state.main.user}-repos`, () =>
     data.map(r => ({
-      name: r.name, archived: r.archived, stars: r.stars, forks: r.forks, open_issues: r.issues,
+      name: r.name, archived: r.archived, stars: r.stars, forks: r.forks,
+      open_issues: r.issues, open_prs: r.prs, issues_include_prs: !!r.issuesInclPrs,
       language: r.language, updated: r.updated, releases: r.releasesCount,
       latest_release: r.latestRelease ? r.latestRelease.tag : null,
       latest_release_downloads: r.latestReleaseDl,
@@ -1866,7 +1945,8 @@ async function renderDashboard() {
           ${r.language ? `<span><span class="lang-dot" style="background:${LANG_COLORS[r.language] || '#888'}"></span> ${esc(r.language)}</span>` : ''}
           <span>⭐ ${formatNumber(r.stars)}</span>
           <span>🔀 ${r.forks}</span>
-          <span>🔓 ${r.issues}</span>
+          <span title="Open issues${r.issuesInclPrs ? ' + pull requests' : ''}">🔓 ${r.issues}</span>
+          ${r.prs !== null && r.prs !== undefined ? `<span title="Open ${prWord() === 'MRs' ? 'merge' : 'pull'} requests">📬 ${r.prs}</span>` : ''}
           <span>📅 ${timeAgo(r.pushed || r.updated)}</span>
           ${showDl && r.totalDl > 0 ? `<span title="All releases — ${esc(partsTitle(r.mainTotalDl, r.totalParts))}" style="color:var(--accent4);font-weight:600">⬇️ ${formatNumber(r.totalDl)} total</span>` : ''}
         </div>
@@ -1892,6 +1972,7 @@ async function renderDashboard() {
         case 'name': return a.name.localeCompare(b.name);
         case 'downloads': return b.totalDl - a.totalDl;
         case 'issues': return b.issues - a.issues;
+        case 'prs': return (b.prs || 0) - (a.prs || 0);
       }
     });
     renderRepoCards(filtered);
@@ -2032,13 +2113,14 @@ async function renderRepoDetail(repoName) {
   const adapter = adapters[state.main.forge];
   const label = forgeLabel(state.main);
 
-  let repo, releases, extras, repoErr = null;
+  let repo, releases, extras, prCounts, repoErr = null;
   try {
-    [repo, releases, extras] = await Promise.all([
+    [repo, releases, extras, prCounts] = await Promise.all([
       // If the live repo call fails, fall back to the data already loaded by the dashboard
       adapter.getRepo(state.main, repoName).catch(e => { repoErr = e; return state.repoCache[repoName] || null; }),
       adapter.listReleases(state.main, repoName),
       adapter.extras(state.main, repoName),
+      adapter.openPrCounts ? adapter.openPrCounts(state.main, [repoName]) : null,
       resolveMirrors([repoName]),
     ]);
   } catch (e) {
@@ -2051,6 +2133,7 @@ async function renderRepoDetail(repoName) {
     return;
   }
 
+  applyPrCounts([repo], prCounts);
   const { contributors, languages, commitActivity, participation } = extras;
 
   // Mirror downloads per release tag
@@ -2106,7 +2189,8 @@ async function renderRepoDetail(repoName) {
   <div class="stats-grid">
     <div class="stat-card"><div class="value">${formatNumber(repo.stars)}</div><div class="label">⭐ Stars</div></div>
     <div class="stat-card"><div class="value">${repo.forks}</div><div class="label">🔀 Forks</div></div>
-    <div class="stat-card"><div class="value">${repo.issues}</div><div class="label">🔓 Open Issues${state.main.forge === 'github' ? ' + PRs' : ''}</div></div>
+    <div class="stat-card"><div class="value">${repo.issues}</div><div class="label">🔓 Open issues${repo.issuesInclPrs ? ' + PRs' : ''}</div></div>
+    ${repo.prs !== null && repo.prs !== undefined ? `<div class="stat-card"><div class="value">${repo.prs}</div><div class="label">📬 Open ${prWord()}</div></div>` : ''}
     ${repo.watchers !== null ? `<div class="stat-card"><div class="value">${repo.watchers}</div><div class="label">👁 Watchers</div></div>` : ''}
     <div class="stat-card highlight"><div class="value">${releases.length}</div><div class="label">📦 Releases</div></div>
     ${showDl ? `<div class="stat-card downloads"><div class="value">${formatNumber(totalDl)}</div><div class="label">⬇️ Total Downloads${anyMirror ? ' (all sources)' : ''}</div></div>` : ''}
@@ -2612,7 +2696,7 @@ function renderLanding() {
       <details class="landing-note">
         <summary style="cursor:pointer">🔧 <strong>How to create a token</strong> (fine-grained vs classic)</summary>
         <ul style="margin:8px 0 0 18px;display:flex;flex-direction:column;gap:6px">
-          <li><strong>Fine-grained (recommended, truly read-only)</strong> — <a href="https://github.com/settings/personal-access-tokens/new" target="_blank">create one</a>. For the rate limit alone, the defaults are fine. To include your private repos: <em>Repository access → All repositories</em> (the default only grants public ones) and <em>Permissions → Contents: Read-only</em> (needed to read releases; Metadata is added automatically).</li>
+          <li><strong>Fine-grained (recommended, truly read-only)</strong> — <a href="https://github.com/settings/personal-access-tokens/new" target="_blank">create one</a>. For the rate limit alone, the defaults are fine. To include your private repos: <em>Repository access → All repositories</em> (the default only grants public ones) and <em>Permissions → Contents: Read-only</em> (needed to read releases; Metadata is added automatically), plus <em>Pull requests: Read-only</em> to count their open PRs apart from issues.</li>
           <li><strong>Classic</strong> — <a href="https://github.com/settings/tokens/new?description=ForgeStats" target="_blank">create one</a>. No scope needed for public repos (rate limit boost only). To include your private repos: check the <em>repo</em> scope. ⚠️ The classic <em>repo</em> scope also grants <em>write</em> access — ForgeStats never writes anything, but prefer fine-grained if you can.</li>
         </ul>
       </details>

@@ -54,10 +54,10 @@ Without a token, GitHub allows 60 API requests/hour — enough for casual use th
 
 | | Rate limit boost only | Include your private repos |
 |---|---|---|
-| **Fine-grained** (recommended, truly read-only) — [create](https://github.com/settings/personal-access-tokens/new) | defaults are fine | Repository access: **All repositories** + Permissions → **Contents: Read-only** (required to read releases; Metadata is added automatically) |
+| **Fine-grained** (recommended, truly read-only) — [create](https://github.com/settings/personal-access-tokens/new) | defaults are fine | Repository access: **All repositories** + Permissions → **Contents: Read-only** (required to read releases; Metadata is added automatically), and **Pull requests: Read-only** so their open PRs are counted apart from issues |
 | **Classic** — [create](https://github.com/settings/tokens/new?description=ForgeStats) | no scope needed | check the **repo** scope ⚠️ it also grants *write* access — ForgeStats never writes anything, but prefer fine-grained if you can |
 
-Common pitfalls: a fine-grained token created with the defaults only sees **public** repositories; and without *Contents: Read-only* your private repos would list but show zero releases.
+Common pitfalls: a fine-grained token created with the defaults only sees **public** repositories; without *Contents: Read-only* your private repos would list but show zero releases; without *Pull requests: Read-only* their open PRs stay counted as issues.
 
 🔒 **Security:** this page has no server. Your token is stored only in your browser's localStorage, sent only to `api.github.com`, and never appears in the URL nor in backups. Leaving the field empty keeps it; use *Remove saved token* on the home page to delete it.
 
