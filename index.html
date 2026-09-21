@@ -222,6 +222,37 @@ header h1 svg { fill: var(--text); }
   font-weight: 400;
 }
 
+/* Latest release of each repo (dashboard) */
+.rel-strip { margin-bottom: 24px; }
+.rel-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(290px, 100%), 1fr));
+  gap: 10px;
+}
+.rel-tile {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--text);
+  text-decoration: none;
+  transition: border-color 0.2s;
+}
+.rel-tile:hover { border-color: var(--accent2); text-decoration: none; }
+.rel-tile.fresh { border-color: rgba(63, 185, 80, 0.55); background: linear-gradient(135deg, rgba(63, 185, 80, 0.08), var(--surface)); }
+.rel-tile .rel-top { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.rel-tile .rel-tag {
+  background: var(--accent2); color: #000; font-weight: 700; font-size: 12px;
+  padding: 2px 9px; border-radius: 12px; white-space: nowrap;
+}
+.rel-tile .rel-tag.pre { background: var(--yellow, #d29922); }
+.rel-tile .rel-repo { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rel-tile .rel-bottom { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--text2); }
+.rel-tile .rel-dl { color: var(--accent4); font-weight: 600; white-space: nowrap; }
+
 /* Repo grid */
 .repo-grid {
   display: grid;
@@ -741,6 +772,16 @@ function getVisFilter() {
 
 function setVisFilter(v) {
   try { localStorage.setItem('fgs_vis', v); } catch {}
+}
+
+// Repo cards order, remembered in this browser (default: most recently pushed first)
+const REPO_SORTS = ['pushed', 'stars', 'forks', 'name', 'downloads', 'issues'];
+function getRepoSort() {
+  try { const v = localStorage.getItem('fgs_sort'); return REPO_SORTS.includes(v) ? v : 'pushed'; } catch { return 'pushed'; }
+}
+
+function setRepoSort(v) {
+  try { localStorage.setItem('fgs_sort', v); } catch {}
 }
 
 // Generic cached JSON fetch. GitHub calls get auth headers + rate-limit display, and skip
@@ -1597,6 +1638,10 @@ function wireRepoMirrors(repoName) {
 
 // ---- DASHBOARD ----
 
+// Latest releases strip: tiles shown before "Show all"
+const REL_STRIP_MAX = 8;
+let relStripAll = false;
+
 async function renderDashboard() {
   const app = document.getElementById('app');
   const label = forgeLabel(state.main);
@@ -1691,16 +1736,9 @@ async function renderDashboard() {
     ? recordHistory(histKey, { dl: totalDl, stars: totalStars })
     : (() => { try { return JSON.parse(localStorage.getItem('fgs_hist:' + histKey) || '[]'); } catch { return []; } })();
 
-  // Most recent release across the scoped repos
-  let mostRecentRelease = null, mostRecentRepo = null;
-  data.forEach(r => {
-    if (r.latestRelease) {
-      if (!mostRecentRelease || new Date(r.latestRelease.date) > new Date(mostRecentRelease.date)) {
-        mostRecentRelease = r.latestRelease;
-        mostRecentRepo = r;
-      }
-    }
-  });
+  // Latest release of every scoped repo, newest first
+  const releaseRepos = data.filter(r => r.latestRelease)
+    .sort((a, b) => new Date(b.latestRelease.date) - new Date(a.latestRelease.date));
 
   document.getElementById('breadcrumb').innerHTML = `
     ${state.main.forge === 'github' ? `<img class="header-avatar" src="https://github.com/${esc(state.main.user)}.png?size=64" alt="">` : ''}
@@ -1727,24 +1765,32 @@ async function renderDashboard() {
     </div>`;
   }
 
-  // Release banner
-  if (mostRecentRelease) {
+  // Latest releases: one clickable tile per repo, so the freshest releases and
+  // their downloads read at a glance (the first ones only, unless expanded)
+  if (releaseRepos.length) {
+    const shown = relStripAll ? releaseRepos : releaseRepos.slice(0, REL_STRIP_MAX);
     html += `
-    <div class="release-banner">
-      <div class="release-tag">${esc(mostRecentRelease.tag)}</div>
-      <div class="release-info">
-        <div class="release-name">${esc(mostRecentRepo.name)} — ${esc(mostRecentRelease.name || mostRecentRelease.tag)}</div>
-        <div class="release-meta">
-          <span>📅 ${formatDate(mostRecentRelease.date)}</span>
-          <span>⏱ ${timeAgo(mostRecentRelease.date)}</span>
-          <span>${mostRecentRelease.prerelease ? '⚠️ Pre-release' : '✅ Stable'}</span>
-        </div>
+    <div class="rel-strip">
+      <div class="section-title">🚀 Latest releases <span style="font-size:11px;color:var(--text2);font-weight:400">(${releaseRepos.length} repo${releaseRepos.length === 1 ? '' : 's'}, newest first)</span></div>
+      <div class="rel-grid">
+        ${shown.map(r => {
+          const rel = r.latestRelease;
+          const fresh = Date.now() - new Date(rel.date).getTime() < 7 * 86400000;
+          const dlTitle = `This release — ${partsTitle(r.mainDl, r.mirrorParts)}${r.totalDl ? ` · all releases: ${r.totalDl}` : ''}`;
+          return `
+          <a class="rel-tile${fresh ? ' fresh' : ''}" href="${esc(repoHref(r.name))}" title="${esc(rel.name || rel.tag)} — ${esc(formatDate(rel.date))}">
+            <div class="rel-top">
+              <span class="rel-tag${rel.prerelease ? ' pre' : ''}">${esc(rel.tag)}</span>
+              <span class="rel-repo">${esc(r.name)}</span>
+            </div>
+            <div class="rel-bottom">
+              <span>${rel.prerelease ? '⚠️ pre-release · ' : ''}${timeAgo(rel.date)}</span>
+              ${showDl ? `<span class="rel-dl" title="${esc(dlTitle)}">⬇️ ${formatNumber(r.latestReleaseDl)}${r.mirrorParts.length ? ' <small style="color:var(--text2);font-weight:400">(+mirrors)</small>' : ''}</span>` : ''}
+            </div>
+          </a>`;
+        }).join('')}
       </div>
-      ${showDl ? `
-      <div class="release-downloads">
-        ${formatNumber(mostRecentRepo.latestReleaseDl)}
-        <small>downloads (this release)${mostRecentRepo.mirrorParts.length ? ` — ${esc(partsTitle(mostRecentRepo.mainDl, mostRecentRepo.mirrorParts))}` : ''}</small>
-      </div>` : ''}
+      ${releaseRepos.length > REL_STRIP_MAX ? `<button class="btn btn-mini" id="relStripToggle" style="margin-top:8px">${relStripAll ? 'Show fewer' : `Show all ${releaseRepos.length}`}</button>` : ''}
     </div>`;
   }
 
@@ -1785,12 +1831,8 @@ async function renderDashboard() {
     <div class="sort-bar">
       <input type="text" id="searchInput" placeholder="Search repositories...">
       <select id="sortSelect">
-        <option value="stars">⭐ Stars</option>
-        <option value="forks">🔀 Forks</option>
-        <option value="updated">📅 Updated</option>
-        <option value="name">🔤 Name</option>
-        <option value="downloads">⬇️ Downloads</option>
-        <option value="issues">🔓 Issues</option>
+        ${[['pushed', '📅 Last push'], ['stars', '⭐ Stars'], ['forks', '🔀 Forks'], ['name', '🔤 Name'], ['downloads', '⬇️ Downloads'], ['issues', '🔓 Issues']]
+          .map(([v, t]) => `<option value="${v}"${v === getRepoSort() ? ' selected' : ''}>${t}</option>`).join('')}
       </select>
     </div>
     <div class="repo-grid" id="repoGrid"></div>
@@ -1798,6 +1840,8 @@ async function renderDashboard() {
 
   app.innerHTML = html;
   wireConfigPanel();
+  const relToggle = document.getElementById('relStripToggle');
+  if (relToggle) relToggle.addEventListener('click', () => { relStripAll = !relStripAll; renderView(); });
 
   wireExport('exportCsvBtn', 'exportJsonBtn', `forgestats-${state.main.user}-repos`, () =>
     data.map(r => ({
@@ -1844,7 +1888,7 @@ async function renderDashboard() {
       switch (sort) {
         case 'stars': return b.stars - a.stars;
         case 'forks': return b.forks - a.forks;
-        case 'updated': return new Date(b.updated) - new Date(a.updated);
+        case 'pushed': return new Date(b.pushed || b.updated) - new Date(a.pushed || a.updated);
         case 'name': return a.name.localeCompare(b.name);
         case 'downloads': return b.totalDl - a.totalDl;
         case 'issues': return b.issues - a.issues;
@@ -1854,7 +1898,7 @@ async function renderDashboard() {
   }
 
   document.getElementById('searchInput').addEventListener('input', sortAndFilter);
-  document.getElementById('sortSelect').addEventListener('change', sortAndFilter);
+  document.getElementById('sortSelect').addEventListener('change', e => { setRepoSort(e.target.value); sortAndFilter(); });
   const visSelEl = document.getElementById('visSelect');
   if (visSelEl) visSelEl.addEventListener('change', e => { setVisFilter(e.target.value); renderView(); });
   sortAndFilter();
