@@ -601,6 +601,37 @@ header h1 svg { fill: var(--text); }
 
 .landing-note { color: var(--text2); font-size: 12px; line-height: 1.5; margin-top: 4px; }
 .landing-note code { background: var(--surface2); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
+[hidden] { display: none !important; }
+.landing-tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 4px; }
+
+/* Configuration panel (dashboard) and per-repo mirror block (detail page) */
+.cfg-panel {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 14px;
+  margin-bottom: 18px;
+  font-size: 13px;
+}
+.cfg-panel > summary { cursor: pointer; font-weight: 600; }
+.cfg-panel h4 { font-size: 12px; color: var(--text2); font-weight: 600; margin: 12px 0 6px; text-transform: uppercase; letter-spacing: .04em; }
+.cfg-list { display: flex; flex-direction: column; gap: 4px; }
+.cfg-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.cfg-row code { background: var(--surface2); padding: 1px 6px; border-radius: 4px; font-size: 12px; word-break: break-all; }
+.cfg-row .muted, .cfg-hint { color: var(--text2); font-size: 11px; }
+.cfg-hint code { background: var(--surface2); padding: 0 4px; border-radius: 4px; }
+.cfg-add { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.cfg-add input {
+  flex: 1; min-width: 0; width: 100%;
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  padding: 6px 10px; border-radius: 6px; font-size: 13px; outline: none;
+}
+.cfg-add input:focus { border-color: var(--accent); }
+.cfg-msg { font-size: 12px; min-height: 16px; margin-top: 6px; }
+.cfg-msg.err { color: var(--accent3); }
+.cfg-msg.ok { color: var(--accent2); }
+.cfg-x { cursor: pointer; color: var(--text2); border: none; background: none; font-size: 13px; padding: 0 4px; }
+.cfg-x:hover { color: var(--accent3); }
 
 /* Responsive */
 @media (max-width: 600px) {
@@ -663,10 +694,12 @@ function forgeLabel(p) {
 
 function forgeColor(p) { return ENGINES[p.forge].color; }
 
-// ---- STATE (populated from the URL: #main=forge:user&mirrors=forge:user,...&repo=name) ----
+// ---- STATE (populated from the URL: #main=forge:user&mirrors=forge:user,...&links=repo>target,...&repo=name) ----
 const state = {
   main: null,
   mirrors: [],       // [{forge, host?, user, names, map: {repoName -> target|null}, _rels: {}}]
+  links: [],         // manual repo -> mirror associations: [{repo, raw, none?} | {repo, raw, m, target, tpl?}]
+  linkMirrors: {},   // mirror objects created by links, by refString (keeps their release cache)
   key: '',
   repoCache: {},     // repo objects from the dashboard, fallback if getRepo fails on the detail page
 };
@@ -1114,11 +1147,31 @@ async function resolveMirrors(repoNames) {
   }));
 }
 
-// Mirrors matching a given repo: [{m, target}]
+function sameSource(a, b) {
+  return a.forge === b.forge && (a.host || '') === (b.host || '');
+}
+
+// Mirrors of a given repo: [{m, target, tpl?, linked?}]. Manual links come first and
+// replace the automatic name match of the same forge; a "none" link disables every
+// automatic match for that repo (explicit links still apply).
 function mirrorsOf(repoName) {
-  return state.mirrors
-    .filter(m => m.map && m.map[repoName])
+  const own = state.links.filter(l => l.repo.toLowerCase() === repoName.toLowerCase());
+  const linked = own.filter(l => !l.none).map(l => ({ m: l.m, target: l.target, tpl: l.tpl, linked: true }));
+  const auto = own.some(l => l.none) ? [] : state.mirrors
+    .filter(m => m.map && m.map[repoName] && !linked.some(e => sameSource(e.m, m)))
     .map(m => ({ m, target: m.map[repoName] }));
+  return [...linked, ...auto];
+}
+
+// SourceForge path template of a release asset. Default layout: <tag>/<file> at the
+// project root. {version} is the tag without its leading "v".
+const SF_DEFAULT_TPL = '{tag}/{file}';
+
+function sfAssetPath(tpl, tag, file) {
+  return (tpl || SF_DEFAULT_TPL)
+    .replace(/\{tag\}/g, tag)
+    .replace(/\{version\}/g, tag.replace(/^v(?=\d)/i, ''))
+    .replace(/\{file\}/g, file);
 }
 
 // Downloads of one release tag on one mirror, broken down per asset file:
@@ -1131,9 +1184,9 @@ async function mirrorDlForTag(entry, tag, assetNames) {
     // any README and its auto-generated source archives — none of which the main
     // forge counts as release assets. Asking for each asset by name is the only
     // way to compare like with like (SF has no CORS-enabled file listing, so the
-    // names have to come from the main forge).
+    // names have to come from the main forge, and the layout from the path template).
     if (!assetNames.length) return { total: 0, byAsset: {} };
-    const counts = await Promise.all(assetNames.map(n => fetchSfDownloads(target, `${tag}/${n}`)));
+    const counts = await Promise.all(assetNames.map(n => fetchSfDownloads(target, sfAssetPath(entry.tpl, tag, n))));
     const byAsset = {};
     assetNames.forEach((n, i) => { if (counts[i]) byAsset[n] = counts[i]; });
     return { total: counts.reduce((s, c) => s + c, 0), byAsset };
@@ -1260,6 +1313,91 @@ function wireExport(csvId, jsonId, filenameBase, getRows) {
     downloadFile(`${filenameBase}.json`, 'application/json', JSON.stringify(getRows(), null, 2)));
 }
 
+// ---- BACKUP ----
+// The configuration lives in the URL, but the local history exists nowhere else:
+// a backup file carries both, so a new browser or machine starts with the curves
+// already built. The token is never included.
+
+const HIST_PREFIX = 'fgs_hist:';
+
+function exportBackup() {
+  const history = {};
+  try {
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (k && k.startsWith(HIST_PREFIX)) history[k.slice(HIST_PREFIX.length)] = JSON.parse(localStorage.getItem(k) || '[]');
+    }
+  } catch {}
+  let config = state.main ? baseHash() : '';
+  if (!config) { try { config = localStorage.getItem('fgs_last') || ''; } catch {} }
+  const data = { app: 'forgestats', version: 1, exported: new Date().toISOString(), config, history, prefs: { vis: getVisFilter() } };
+  const who = state.main ? `-${state.main.user}` : '';
+  downloadFile(`forgestats-backup${who}-${new Date().toISOString().slice(0, 10)}.json`, 'application/json', JSON.stringify(data, null, 2));
+}
+
+function sanitizeHistEntry(e) {
+  if (!e || typeof e.d !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(e.d)) return null;
+  const out = { d: e.d };
+  ['dl', 'stars'].forEach(f => { if (Number.isFinite(e[f])) out[f] = e[f]; });
+  return Object.keys(out).length > 1 ? out : null;
+}
+
+// Merges one imported series into the local one: union by day, the local snapshot
+// wins when both have the same day. Returns the number of days added.
+function mergeHistory(key, entries) {
+  const k = HIST_PREFIX + key;
+  let local = [];
+  try { local = JSON.parse(localStorage.getItem(k) || '[]'); } catch {}
+  const byDay = new Map();
+  entries.map(sanitizeHistEntry).filter(Boolean).forEach(e => byDay.set(e.d, e));
+  local.forEach(e => byDay.set(e.d, e));
+  const merged = [...byDay.values()].sort((a, b) => a.d.localeCompare(b.d)).slice(-400);
+  localStorage.setItem(k, JSON.stringify(merged));
+  return merged.length - local.length;
+}
+
+// Returns {series, days, config} — config is a validated hash string or ''
+async function importBackup(file) {
+  let data;
+  try { data = JSON.parse(await file.text()); } catch { throw new Error('Not a valid JSON file.'); }
+  if (!data || data.app !== 'forgestats' || typeof data.history !== 'object' || !data.history) {
+    throw new Error('Not a ForgeStats backup.');
+  }
+  let series = 0, days = 0;
+  for (const [key, entries] of Object.entries(data.history)) {
+    if (!/^(dash|repo):/.test(key) || key.length > 500 || !Array.isArray(entries)) continue;
+    const added = mergeHistory(key, entries);
+    series++;
+    days += Math.max(0, added);
+  }
+  if (data.prefs && ['all', 'public', 'private'].includes(data.prefs.vis)) setVisFilter(data.prefs.vis);
+  const config = typeof data.config === 'string' && parseRef(new URLSearchParams(data.config).get('main')) ? data.config : '';
+  return { series, days, config };
+}
+
+// `onConfig(hash)` decides what to do with the configuration carried by the backup
+function wireBackupImport(btnId, fileId, msgId, onConfig) {
+  const btn = document.getElementById(btnId);
+  const input = document.getElementById(fileId);
+  const msg = document.getElementById(msgId);
+  if (!btn || !input) return;
+  btn.addEventListener('click', () => input.click());
+  input.addEventListener('change', async () => {
+    const file = input.files[0];
+    input.value = '';
+    if (!file) return;
+    try {
+      const r = await importBackup(file);
+      msg.className = 'cfg-msg ok';
+      msg.textContent = `✓ History restored: ${r.series} series, ${r.days} new day${r.days === 1 ? '' : 's'}.`;
+      if (r.config) onConfig(r.config, msg);
+    } catch (e) {
+      msg.className = 'cfg-msg err';
+      msg.textContent = `✗ ${e.message}`;
+    }
+  });
+}
+
 // ---- HELPERS ----
 
 // Escape external data before injecting into innerHTML (repo descriptions, release
@@ -1286,6 +1424,172 @@ function timeAgo(d) {
   if (days < 30) return `${days}d ago`;
   if (days < 365) return `${Math.floor(days / 30)}mo ago`;
   return `${Math.floor(days / 365)}y ago`;
+}
+
+// ---- CONFIGURATION PANEL (dashboard) ----
+// Edits mirrors and links in place: no trip through the home page, token untouched.
+
+let cfgPanelOpen = false;
+
+function configPanelHtml() {
+  const nm = state.mirrors.length, nl = state.links.length;
+  return `
+  <details class="cfg-panel" id="cfgPanel"${cfgPanelOpen ? ' open' : ''}>
+    <summary>⚙️ Configuration <span class="cfg-hint" style="font-weight:400">— ${nm} mirror profile${nm === 1 ? '' : 's'}, ${nl} manual link${nl === 1 ? '' : 's'}</span></summary>
+    <h4>Mirror profiles</h4>
+    <div class="cfg-list">
+      ${nm ? state.mirrors.map((m, i) => `
+        <div class="cfg-row"><code>${esc(forgeLabel(m))} · ${esc(m.user)}</code><button class="cfg-x" data-rm-mirror="${i}" title="Remove this mirror">✕</button></div>`).join('')
+        : '<span class="cfg-hint">None — download counts come from the main profile only.</span>'}
+    </div>
+    <div class="cfg-add">
+      <input type="text" id="addMirrorInput" placeholder="https://sourceforge.net/u/username/profile, https://codeberg.org/username">
+      <button class="btn btn-mini" id="addMirrorBtn">+ Add mirror</button>
+    </div>
+    <div class="cfg-msg" id="mirrorMsg"></div>
+    <h4>Manual links</h4>
+    <div class="cfg-list">
+      ${nl ? state.links.map((l, i) => `
+        <div class="cfg-row"><code>${esc(l.repo)}</code> →
+          ${l.none ? '<span class="muted">automatic matching disabled</span>' : `<code>${esc(forgeLabel(l.m))} · ${esc(describeEntry(l))}</code>`}
+          <button class="cfg-x" data-rm-link="${i}" title="Remove this link">✕</button></div>`).join('')
+        : '<span class="cfg-hint">None. Add one from a repository page when a mirror has another name or lives in a SourceForge sub-folder.</span>'}
+    </div>
+    <h4>Share &amp; backup</h4>
+    <div class="cfg-row">
+      <button class="btn btn-mini" id="copyCfgBtn">🔗 Copy configuration link</button>
+      <button class="btn btn-mini" id="exportBackupBtn">⬇ Backup (configuration + history)</button>
+      <button class="btn btn-mini" id="importBackupBtn">⬆ Restore a backup</button>
+      <input type="file" id="importBackupFile" accept=".json,application/json" hidden>
+    </div>
+    <div class="cfg-msg" id="cfgMsg"></div>
+    <p class="cfg-hint">The link holds the main profile, mirrors and manual links. The backup file adds the history recorded in this browser (merged on restore, nothing overwritten). Neither ever contains your token.</p>
+  </details>`;
+}
+
+async function copyConfigLink(msg) {
+  const url = configUrl();
+  try {
+    await navigator.clipboard.writeText(url);
+    msg.className = 'cfg-msg ok';
+    msg.textContent = '✓ Configuration link copied.';
+  } catch {
+    // Clipboard refused (permissions, insecure context): hand the link over to copy by hand
+    msg.className = 'cfg-msg';
+    msg.innerHTML = `<input type="text" readonly value="${esc(url)}" style="width:100%;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:4px 8px;border-radius:6px;font-size:12px">`;
+    msg.querySelector('input').select();
+  }
+}
+
+function addMirrors(text) {
+  const mirrors = [...state.mirrors];
+  for (const mi of text.split(/[,\s]+/).filter(Boolean)) {
+    const p = parseProfile(mi);
+    if (!p) return `Unrecognized mirror profile: "${mi}"`;
+    if (!ENGINES[p.forge].mirror) return `${forgeLabel(p)} cannot be used as a mirror (no download counts).`;
+    delete p.repo;
+    const same = q => sameSource(q, p) && q.user.toLowerCase() === p.user.toLowerCase();
+    if (same(state.main) || mirrors.some(same)) continue;
+    mirrors.push(p);
+  }
+  if (mirrors.length === state.mirrors.length) return 'Nothing new to add.';
+  setConfig({ mirrors });
+  return null;
+}
+
+function wireConfigPanel() {
+  const panel = document.getElementById('cfgPanel');
+  if (!panel) return;
+  panel.addEventListener('toggle', () => { cfgPanelOpen = panel.open; });
+  const mirrorMsg = document.getElementById('mirrorMsg');
+  const addInput = document.getElementById('addMirrorInput');
+  const add = () => {
+    const err = addMirrors(addInput.value);
+    if (err) { mirrorMsg.className = 'cfg-msg err'; mirrorMsg.textContent = err; }
+  };
+  document.getElementById('addMirrorBtn').addEventListener('click', add);
+  addInput.addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
+  panel.querySelectorAll('[data-rm-mirror]').forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.rmMirror;
+    setConfig({ mirrors: state.mirrors.filter((_, j) => j !== i) });
+  }));
+  panel.querySelectorAll('[data-rm-link]').forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.rmLink;
+    setConfig({ links: state.links.filter((_, j) => j !== i) });
+  }));
+  const msg = document.getElementById('cfgMsg');
+  document.getElementById('copyCfgBtn').addEventListener('click', () => copyConfigLink(msg));
+  document.getElementById('exportBackupBtn').addEventListener('click', exportBackup);
+  // Restoring from a dashboard doesn't navigate away on its own: the backup may
+  // come from another configuration, so opening it is offered instead
+  wireBackupImport('importBackupBtn', 'importBackupFile', 'cfgMsg', (config, m) => {
+    const actions = document.createElement('span');
+    actions.innerHTML = config !== baseHash()
+      ? ' <button class="btn btn-mini">Open the imported configuration</button>'
+      : ' <button class="btn btn-mini">↻ Refresh the charts</button>';
+    actions.querySelector('button').addEventListener('click', () => {
+      if (config !== baseHash()) window.location.hash = config; else handleRoute();
+    });
+    m.appendChild(actions);
+  });
+}
+
+// Per-repo mirror block (detail page): shows where the mirror downloads come from,
+// and links the repo by hand when the name match can't find it
+function repoMirrorsHtml(repoName) {
+  const entries = mirrorsOf(repoName);
+  const noneIdx = state.links.findIndex(l => l.none && l.repo.toLowerCase() === repoName.toLowerCase());
+  const linkIdx = e => state.links.findIndex(l => !l.none && l.m === e.m && l.target === e.target && l.tpl === e.tpl
+    && l.repo.toLowerCase() === repoName.toLowerCase());
+  const autoCount = state.mirrors.filter(m => m.map && m.map[repoName]).length;
+  return `
+  <details class="cfg-panel" id="repoMirrors"${entries.length ? '' : ' open'}>
+    <summary>🪞 Mirror sources <span class="cfg-hint" style="font-weight:400">— ${entries.length ? esc([...new Set(entries.map(e => forgeLabel(e.m)))].join(', ')) : 'none'}</span></summary>
+    <div class="cfg-list" style="margin-top:10px">
+      ${entries.map(e => `
+        <div class="cfg-row"><code>${esc(forgeLabel(e.m))} · ${esc(describeEntry(e))}</code>
+          <span class="muted">${e.linked ? 'linked by hand' : 'matched by name'}</span>
+          ${e.linked ? `<button class="cfg-x" data-rm-link="${linkIdx(e)}" title="Remove this link">✕</button>` : ''}</div>`).join('')}
+      ${noneIdx >= 0 ? `<div class="cfg-row"><span class="muted">Automatic matching disabled for this repo.</span><button class="btn btn-mini" data-rm-link="${noneIdx}">Re-enable</button></div>` : ''}
+      ${!entries.length && noneIdx < 0 ? '<span class="cfg-hint">No mirror found by name for this repo.</span>' : ''}
+    </div>
+    <div class="cfg-add">
+      <input type="text" id="linkInput" placeholder="https://sourceforge.net/projects/<project>/files/<folder>/ or https://codeberg.org/<user>/<repo>">
+      <button class="btn btn-mini" id="linkAddBtn">+ Link</button>
+      ${noneIdx < 0 && autoCount ? '<button class="btn btn-mini" id="linkNoneBtn" title="For a repo wrongly matched by name">Ignore automatic matches</button>' : ''}
+    </div>
+    <div class="cfg-msg" id="linkMsg"></div>
+    <p class="cfg-hint">SourceForge: paste the folder that holds the release folders — files are looked up as <code>&lt;folder&gt;/{tag}/{file}</code>. Another layout? End the path with a template containing <code>{file}</code>: <code>…/files/Releases/{version}/{file}</code> (<code>{version}</code> = tag without its "v"), or <code>…/files/Releases/{file}</code> for a flat folder. A link replaces the automatic match of the same forge.</p>
+  </details>`;
+}
+
+function wireRepoMirrors(repoName) {
+  const box = document.getElementById('repoMirrors');
+  if (!box) return;
+  const input = document.getElementById('linkInput');
+  const msg = document.getElementById('linkMsg');
+  const add = () => {
+    const raw = linkInputToRaw(input.value);
+    if (!raw || raw === 'none') {
+      msg.className = 'cfg-msg err';
+      msg.textContent = 'Unrecognized mirror location. Paste a SourceForge folder URL (…/projects/<project>/files/<folder>/) or a repository URL (GitHub, Codeberg, gitea:https://host/user/repo).';
+      return;
+    }
+    if (state.links.some(l => l.repo.toLowerCase() === repoName.toLowerCase() && l.raw === raw)) {
+      msg.className = 'cfg-msg err';
+      msg.textContent = 'This link already exists.';
+      return;
+    }
+    setConfig({ links: [...state.links, { repo: repoName, raw }] });
+  };
+  document.getElementById('linkAddBtn').addEventListener('click', add);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') add(); });
+  const noneBtn = document.getElementById('linkNoneBtn');
+  if (noneBtn) noneBtn.addEventListener('click', () => setConfig({ links: [...state.links, { repo: repoName, raw: 'none' }] }));
+  box.querySelectorAll('[data-rm-link]').forEach(b => b.addEventListener('click', () => {
+    const i = +b.dataset.rmLink;
+    setConfig({ links: state.links.filter((_, j) => j !== i) });
+  }));
 }
 
 // ---- DASHBOARD ----
@@ -1405,7 +1709,7 @@ async function renderDashboard() {
     <a onclick="navigateHome()" style="font-size:12px">(change)</a>
   `;
 
-  let html = '';
+  let html = configPanelHtml();
 
   // Global scope selector (shown only when private repos are loaded)
   if (privCountAll) {
@@ -1490,6 +1794,7 @@ async function renderDashboard() {
   </div>`;
 
   app.innerHTML = html;
+  wireConfigPanel();
 
   wireExport('exportCsvBtn', 'exportJsonBtn', `forgestats-${state.main.user}-repos`, () =>
     data.map(r => ({
@@ -1793,6 +2098,8 @@ async function renderRepoDetail(repoName) {
     </div>`;
   }
 
+  html += repoMirrorsHtml(repoName);
+
   // Charts
   html += `<div class="charts-grid">`;
 
@@ -1891,6 +2198,7 @@ async function renderRepoDetail(repoName) {
   }
 
   app.innerHTML = html;
+  wireRepoMirrors(repoName);
 
   wireExport('exportRelCsvBtn', 'exportRelJsonBtn', `forgestats-${state.main.user}-${repoName}-releases`, () =>
     releases.map(r => ({
@@ -2211,23 +2519,53 @@ function parseProfile(input) {
   return null;
 }
 
+// Profile as the home page form expects it (the inverse of parseProfile)
+function profileInput(p) {
+  switch (p.forge) {
+    case 'github': return `https://github.com/${p.user}`;
+    case 'sourceforge': return `https://sourceforge.net/u/${p.user}/profile`;
+    case 'gitlab': return p.host === 'gitlab.com' ? `https://gitlab.com/${p.user}` : `gitlab:https://${p.host}/${p.user}`;
+    case 'gitea': return p.host === 'codeberg.org' ? `https://codeberg.org/${p.user}` : `gitea:https://${p.host}/${p.user}`;
+  }
+}
+
+// Manual links of the configuration being edited on the home page: kept as long as
+// the main profile stays the same (they name its repositories)
+let landingCarry = null;
+
 function renderLanding() {
   document.getElementById('breadcrumb').innerHTML = '';
   const app = document.getElementById('app');
+  // Pre-fill with the configuration just left, or the last one opened in this browser
+  const prev = state.main
+    ? { main: state.main, mirrors: state.mirrors, links: state.links }
+    : (() => { const c = lastConfig(); return c && { ...c, links: parseLinks(c.links) }; })();
+  landingCarry = prev;
+  const hasToken = !!getToken();
   app.innerHTML = `
   <div class="landing">
     <h2>📊 ForgeStats</h2>
-    <p>Repository, release and download stats for any account on a software forge — GitHub, GitLab, Codeberg or self-hosted instances — with download counts from mirrors (GitHub, Codeberg/Gitea, SourceForge) automatically detected and added. Projects are matched across forges by name.</p>
+    <p>Repository, release and download stats for any account on a software forge — GitHub, GitLab, Codeberg or self-hosted instances — with download counts from mirrors (GitHub, Codeberg/Gitea, SourceForge) automatically detected and added. Projects are matched across forges by name — or linked by hand from a repository page (renamed repos, SourceForge sub-folders).</p>
     <div class="landing-form">
       <label>Main profile or repository <span class="req">required</span></label>
-      <input type="text" id="mainInput" placeholder="https://github.com/username — profile or repo link (gitlab.com, codeberg.org too)">
+      <input type="text" id="mainInput" placeholder="https://github.com/username — profile or repo link (gitlab.com, codeberg.org too)" value="${prev ? esc(profileInput(prev.main)) : ''}">
       <label>Mirror profiles <span class="opt">optional — comma separated, adds their download counts</span></label>
-      <input type="text" id="mirrorsInput" placeholder="https://sourceforge.net/u/username/profile, https://codeberg.org/username">
+      <input type="text" id="mirrorsInput" placeholder="https://sourceforge.net/u/username/profile, https://codeberg.org/username" value="${prev ? esc(prev.mirrors.map(profileInput).join(', ')) : ''}">
+      ${prev && prev.links.length ? `<p class="landing-note" id="linksNote">🔗 ${prev.links.length} manual link${prev.links.length > 1 ? 's' : ''} kept with this configuration (dropped if you change the main profile).</p>` : ''}
       <label>GitHub token <span class="opt">optional — only used for github.com calls</span></label>
-      <input type="password" id="tokenInput" placeholder="ghp_... or github_pat_..." autocomplete="off">
+      <input type="password" id="tokenInput" placeholder="${hasToken ? '🔑 A token is saved in this browser — leave empty to keep it' : 'ghp_... or github_pat_...'}" autocomplete="off">
+      <div class="landing-tools" id="tokenTools"${hasToken ? '' : ' hidden'}>
+        <span class="landing-note" style="margin:0">🔑 Token saved in this browser.</span>
+        <button class="btn btn-mini" id="forgetTokenBtn" type="button">Remove saved token</button>
+      </div>
       <button class="btn btn-primary" id="goBtn">View stats</button>
       <p class="landing-error" id="landingError"></p>
-      <p class="landing-note">🔒 <strong>Token security:</strong> this page has no backend. Your token is stored only in this browser (localStorage) and sent only to <code>api.github.com</code> — never anywhere else. It never appears in the URL. Clear the field and submit again to remove it.</p>
+      <div class="landing-tools">
+        <button class="btn btn-mini" id="importBackupBtn" type="button">⬆ Restore a backup</button>
+        <input type="file" id="importBackupFile" accept=".json,application/json" hidden>
+        <span class="cfg-msg" id="backupMsg" style="margin:0"></span>
+      </div>
+      <p class="landing-note">🔒 <strong>Token security:</strong> this page has no backend. Your token is stored only in this browser (localStorage) and sent only to <code>api.github.com</code> — never anywhere else. It never appears in the URL nor in backups. Leave the field empty to keep it; use <em>Remove saved token</em> to delete it.</p>
       <p class="landing-note">Without a token, GitHub allows 60 API requests/hour (responses are cached for 30 min). With a token: 5,000/hour — and if the token belongs to the GitHub profile you enter, your <strong>private repos</strong> are included too.</p>
       <details class="landing-note">
         <summary style="cursor:pointer">🔧 <strong>How to create a token</strong> (fine-grained vs classic)</summary>
@@ -2245,6 +2583,13 @@ function renderLanding() {
   app.querySelectorAll('input').forEach(el =>
     el.addEventListener('keydown', e => { if (e.key === 'Enter') submitLanding(); })
   );
+  document.getElementById('forgetTokenBtn').addEventListener('click', () => {
+    try { localStorage.removeItem('fgs_token'); } catch {}
+    document.getElementById('tokenTools').hidden = true;
+    document.getElementById('tokenInput').placeholder = 'ghp_... or github_pat_...';
+  });
+  // A restored backup opens its configuration right away (typically a new browser)
+  wireBackupImport('importBackupBtn', 'importBackupFile', 'backupMsg', config => { window.location.hash = config; });
 }
 
 function submitLanding() {
@@ -2270,12 +2615,12 @@ function submitLanding() {
     if (p.forge === main.forge && (p.host || '') === (main.host || '') && p.user.toLowerCase() === main.user.toLowerCase()) continue;
     mirrors.push(p);
   }
+  // An empty field keeps the saved token (removal has its own button)
   const token = document.getElementById('tokenInput').value.trim();
-  try { token ? localStorage.setItem('fgs_token', token) : localStorage.removeItem('fgs_token'); } catch {}
-  let hash = `main=${encodeURIComponent(refString(main))}`;
-  if (mirrors.length) hash += `&mirrors=${encodeURIComponent(mirrors.map(refString).join(','))}`;
-  if (main.repo) hash += `&repo=${encodeURIComponent(main.repo)}`;
-  window.location.hash = hash;
+  if (token) { try { localStorage.setItem('fgs_token', token); } catch {} }
+  const links = landingCarry && refString(landingCarry.main).toLowerCase() === refString(main).toLowerCase()
+    ? landingCarry.links : [];
+  window.location.hash = buildHash(main, mirrors, links, main.repo);
 }
 
 // ---- NAVIGATION (shareable hash: #main=forge:user&mirrors=forge:user,...&repo=name) ----
@@ -2301,17 +2646,131 @@ function parseRef(s) {
   return { forge: f, user: m[2] };
 }
 
-function baseHash() {
-  let h = `main=${encodeURIComponent(refString(state.main))}`;
-  if (state.mirrors.length) {
-    h += `&mirrors=${encodeURIComponent(state.mirrors.map(refString).join(','))}`;
+// ---- MANUAL LINKS ----
+// A link ties one repo of the main profile to a mirror target the name match can't
+// find: a renamed repo, or a SourceForge sub-folder. Serialized as `repo>target`:
+//   sourceforge:<project>                       project root, <tag>/<file> layout
+//   sourceforge:<project>/<folder>              <folder>/<tag>/<file>
+//   sourceforge:<project>/<template with {file}> full path template ({tag}, {version}, {file})
+//   github:<user>/<repo>, codeberg:<user>/<repo>, gitea@<host>:<user>/<repo>
+//   none                                        disables the automatic matches
+
+const REPO_NAME_RE = /^[A-Za-z0-9_.-]+$/;
+
+// Returns {none: true} | {m, target, tpl?} | null
+function parseLinkTarget(raw) {
+  raw = (raw || '').trim();
+  if (raw.toLowerCase() === 'none') return { none: true };
+  if (/[,>#&?\\]/.test(raw)) return null;
+  const slash = raw.indexOf('/');
+  const ref = parseRef(slash < 0 ? raw : raw.slice(0, slash));
+  if (!ref || !ENGINES[ref.forge] || !ENGINES[ref.forge].mirror) return null;
+  const rest = slash < 0 ? '' : raw.slice(slash + 1).replace(/^\/+|\/+$/g, '');
+  const k = refString(ref);
+  const m = state.linkMirrors[k] || (state.linkMirrors[k] = { ...ref, _rels: {} });
+  if (ref.forge === 'sourceforge') {
+    if (rest && rest.split('/').some(s => !s || s === '.' || s === '..')) return null;
+    const unknown = (rest.match(/\{[^}]*\}/g) || []).filter(t => !['{tag}', '{version}', '{file}'].includes(t));
+    if (unknown.length) return null;
+    const tpl = !rest ? SF_DEFAULT_TPL : rest.includes('{file}') ? rest : `${rest}/${SF_DEFAULT_TPL}`;
+    return { m, target: ref.user, tpl };
   }
+  if (!REPO_NAME_RE.test(rest)) return null;
+  return { m, target: rest };
+}
+
+// What the user pastes (a mirror URL or the shorthand) -> the shorthand, or null
+function linkInputToRaw(input) {
+  input = (input || '').trim();
+  if (!input) return null;
+  if (input.toLowerCase() === 'none') return 'none';
+  // SourceForge files URL: https://sourceforge.net/projects/<p>/files/<folder>/
+  let m = input.match(/sourceforge\.net\/(?:projects|p)\/([A-Za-z0-9_.-]+)(?:\/files)?\/?([^?#]*)/i);
+  if (m) {
+    let folder = m[2].replace(/\/+$/, '').replace(/\/stats\/json$/, '');
+    try { folder = decodeURIComponent(folder); } catch {}
+    const raw = `sourceforge:${m[1]}${folder ? '/' + folder : ''}`;
+    return parseLinkTarget(raw) ? raw : null;
+  }
+  if (parseLinkTarget(input)) return input;
+  // Repository URL on a git forge
+  const p = parseProfile(input);
+  if (p && p.repo && ENGINES[p.forge].mirror) {
+    const raw = `${refString(p)}/${p.repo}`;
+    return parseLinkTarget(raw) ? raw : null;
+  }
+  return null;
+}
+
+// Human-readable description of a mirror entry (see mirrorsOf)
+function describeEntry(e) {
+  if (e.m.forge === 'sourceforge') return `${e.target}/${e.tpl || SF_DEFAULT_TPL}`;
+  return `${e.m.user}/${e.target}`;
+}
+
+function parseLinks(s) {
+  return (s || '').split(',').map(entry => {
+    const i = entry.indexOf('>');
+    if (i <= 0) return null;
+    const repo = entry.slice(0, i).trim();
+    const raw = entry.slice(i + 1).trim();
+    if (!REPO_NAME_RE.test(repo)) return null;
+    const t = parseLinkTarget(raw);
+    return t ? { repo, raw, ...t } : null;
+  }).filter(Boolean);
+}
+
+// ---- NAVIGATION ----
+
+// URL-encodes a hash value but keeps the separators readable (/, :, >, {, }, @, comma)
+function hashVal(s) {
+  return encodeURIComponent(s).replace(/%(2F|3A|3E|7B|7D|40|2C)/gi, c => decodeURIComponent(c));
+}
+
+function buildHash(main, mirrors, links, repo) {
+  let h = `main=${hashVal(refString(main))}`;
+  if (mirrors.length) h += `&mirrors=${hashVal(mirrors.map(refString).join(','))}`;
+  if (links.length) h += `&links=${hashVal(links.map(l => `${l.repo}>${l.raw}`).join(','))}`;
+  if (repo) h += `&repo=${hashVal(repo)}`;
   return h;
+}
+
+function baseHash() { return buildHash(state.main, state.mirrors, state.links); }
+
+function currentRepoParam() {
+  return new URLSearchParams(window.location.hash.slice(1)).get('repo');
+}
+
+// Rewrites the configuration part of the URL, staying on the current page
+function setConfig({ mirrors = state.mirrors, links = state.links } = {}) {
+  window.location.hash = buildHash(state.main, mirrors, links, currentRepoParam());
+}
+
+function configUrl() {
+  return `${location.origin}${location.pathname}#${baseHash()}`;
 }
 
 function navigateHome() { window.location.hash = ''; }
 function navigateDash() { window.location.hash = baseHash(); }
-function navigateToRepo(name) { window.location.hash = `${baseHash()}&repo=${encodeURIComponent(name)}`; }
+function navigateToRepo(name) { window.location.hash = buildHash(state.main, state.mirrors, state.links, name); }
+
+// The last configuration opened, so the home page can be pre-filled (this browser only)
+function rememberConfig() {
+  try { localStorage.setItem('fgs_last', baseHash()); } catch {}
+}
+
+function lastConfig() {
+  try {
+    const p = new URLSearchParams(localStorage.getItem('fgs_last') || '');
+    const main = parseRef(p.get('main'));
+    if (!main) return null;
+    return {
+      main,
+      mirrors: (p.get('mirrors') || '').split(',').map(parseRef).filter(Boolean),
+      links: p.get('links') || ''
+    };
+  } catch { return null; }
+}
 
 function handleRoute() {
   const p = new URLSearchParams(window.location.hash.slice(1));
@@ -2321,12 +2780,16 @@ function handleRoute() {
   const mirrors = (p.get('mirrors') || '').split(',').map(parseRef)
     .filter(m => m && ENGINES[m.forge] && ENGINES[m.forge].mirror);
 
+  // Links don't belong to the key: it also names the local history series, which
+  // must not restart every time a repo gets linked by hand
   const key = `${refString(main)}|${mirrors.map(refString).join(',')}`;
   if (key !== state.key) {
     state.main = main;
     state.mirrors = mirrors;
     state.key = key;
   }
+  state.links = parseLinks(p.get('links'));
+  rememberConfig();
 
   const repo = p.get('repo');
   if (repo) renderRepoDetail(repo); else renderDashboard();

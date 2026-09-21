@@ -30,10 +30,13 @@ Self-hosted instances: prefix the URL with its engine — `gitea:https://git.exa
 
 - **100% static, no backend.** A single HTML file. All API calls go directly from your browser to the forges' public APIs (they all allow CORS).
 - **Mirror matching by name.** `UnityGameTranslator` on GitHub ↔ `unitygametranslator` on SourceForge — names are normalized (lowercase, alphanumeric) and matched automatically from the mirror profile's project list.
+- **Manual links.** When the name match can't find a mirror (renamed repo, several projects sharing one SourceForge project in sub-folders), link it by hand from the repository page — paste the mirror's URL. See [Mirroring conventions](#mirroring-conventions).
 - **Per-release aggregation.** Mirror downloads are matched to release tags: GitHub/Codeberg mirrors by release tag, SourceForge by file folder named after the tag (e.g. `/files/v1.2.3/`).
-- **Shareable URLs.** `#main=github:user&mirrors=sourceforge:user,codeberg:user` — send your stats page to anyone. A repository URL as input (`github.com/user/repo`) jumps straight to that repo's page.
+- **Shareable URLs.** `#main=github:user&mirrors=sourceforge:user,codeberg:user&links=repo>sourceforge:project/folder` — send your stats page to anyone. A repository URL as input (`github.com/user/repo`) jumps straight to that repo's page.
+- **Edit in place.** The ⚙️ Configuration panel on the dashboard adds or removes mirrors and links without going back to the home page; the home page is pre-filled with the last configuration, and a saved token is kept.
 - **Local history.** Each visit records a daily snapshot of the numbers in your browser — revisit over time and evolution charts (downloads, stars) build up automatically. Stored locally only, nothing is sent anywhere.
 - **Export.** Download the repo list or the release table as CSV or JSON.
+- **Backup.** One JSON file carries the configuration and the local history; restoring it in another browser merges the history (nothing overwritten). The token is never included.
 - **Cached.** API responses are cached in localStorage for 30 minutes to stay within anonymous rate limits.
 
 Repository view — total downloads across all sources, with the per-release GitHub/SourceForge breakdown in the stacked chart:
@@ -53,7 +56,7 @@ Without a token, GitHub allows 60 API requests/hour — enough for casual use th
 
 Common pitfalls: a fine-grained token created with the defaults only sees **public** repositories; and without *Contents: Read-only* your private repos would list but show zero releases.
 
-🔒 **Security:** this page has no server. Your token is stored only in your browser's localStorage, sent only to `api.github.com`, and never appears in the URL. To remove it, clear the field and submit again.
+🔒 **Security:** this page has no server. Your token is stored only in your browser's localStorage, sent only to `api.github.com`, and never appears in the URL nor in backups. Leaving the field empty keeps it; use *Remove saved token* on the home page to delete it.
 
 ## Mirroring conventions
 
@@ -61,6 +64,17 @@ For per-release mirror counts to match, mirrors should follow the usual conventi
 
 - **GitHub/Codeberg mirrors:** same repo name (case-insensitive), same release tags.
 - **SourceForge mirrors:** project slug matching the repo name, files organized in folders named after the release tags (`v1.2.3/…`). This is what standard mirroring scripts produce.
+
+Anything else can be linked by hand on the repository page (🪞 Mirror sources → paste a URL):
+
+| Mirror layout | What to paste | Files looked up |
+|---|---|---|
+| SourceForge sub-folder | `https://sourceforge.net/projects/<project>/files/<folder>/` | `<folder>/<tag>/<file>` |
+| SourceForge, tag without "v" | `…/files/<folder>/{version}/{file}` | `<folder>/1.2.3/<file>` |
+| SourceForge, flat folder | `…/files/<folder>/{file}` | `<folder>/<file>` |
+| Renamed repo | `https://codeberg.org/<user>/<repo>` (or GitHub, `gitea:https://host/user/repo`) | same release tags |
+
+A link replaces the automatic match of the same forge. *Ignore automatic matches* drops a wrong name match.
 
 Unmatched projects or tags simply contribute 0 — numbers are never guessed.
 
